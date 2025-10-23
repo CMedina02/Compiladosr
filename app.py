@@ -1,0 +1,168 @@
+# app.py
+import tkinter as tk
+from tkinter import ttk, messagebox
+from analyzer import analizar_dos_pasadas
+
+EJEMPLO = (
+    "E$ auroraM19 , ROGER27 , cris500;\n"
+    "F$ ACR3 , escuela2 , ME3924;\n"
+    "C$ ACRMM5 , cafe1025 , tarea9;\n"
+    "auroraM19= 5 + \"hola\"+ 3;\n"
+    "cris500= 2023 + 2024 * 2025;\n"
+    "ACR3= \"2\";\n"
+    "escuela2= 5-2*3/5;\n"
+    "ME3924= 10+10/27;\n"
+    "ACRMM5= tarea10;\n"
+    "cafe1025= tarea9 + tarea10;\n"
+    "tarea9= \"T\" + \"I\" + \"1\";\n"
+    "ROGER27= 29.6;\n"
+    "escuela2= 23.14 + hola;\n"
+    "E$ i = 0;\n"
+    "do{\n"
+    "System.out.println(i);\n"
+    "  i++;\n"
+    "} while(i < 1);\n"
+    "cris500= hola;\n"
+    "tarea9= \"89\";\n"
+    "ME3924= MUNDO;\n"
+    "C$ = auroraM19 , ROGER27;\n"
+    "cafe1025= tarea9 - 1;\n"
+    "ME3924= 29.6 - tarea10;\n"
+)
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Mini-Compilador Automatas II")
+        self.geometry("1920x1080")
+
+        # ====== Panel izquierdo (editor con números de línea) ======
+        left = ttk.LabelFrame(self, text="Entrada del programa")
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        editor_wrap = ttk.Frame(left)
+        editor_wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        # Columna de números de línea
+        self.line_nums = tk.Text(
+            editor_wrap, width=5, padx=6, takefocus=0, border=0,
+            background="#f3f3f3", state="disabled", wrap="none",
+            font=("Consolas", 12)
+        )
+        self.line_nums.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Editor principal
+        self.txt = tk.Text(
+            editor_wrap, wrap="none", undo=True, font=("Consolas", 12)
+        )
+        self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Scrollbar vertical compartida
+        yscroll = ttk.Scrollbar(editor_wrap, orient="vertical")
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        yscroll.config(command=self._sync_yview)
+        self.txt.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.txt))
+        self.line_nums.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.line_nums))
+
+        # Scrollbar horizontal solo para el editor
+        xscroll = ttk.Scrollbar(left, orient="horizontal", command=self.txt.xview)
+        xscroll.pack(fill=tk.X, padx=6)
+        self.txt.config(xscrollcommand=xscroll.set)
+
+        # Texto ejemplo
+        self.txt.insert("1.0", EJEMPLO)
+
+        # Eventos para actualizar los números de línea
+        self.txt.bind("<KeyRelease>", self._update_line_numbers)
+        self.txt.bind("<MouseWheel>", self._update_line_numbers)
+        self.txt.bind("<ButtonRelease-1>", self._update_line_numbers)
+        self.txt.bind("<<Modified>>", self._on_modified)
+        self.bind("<Configure>", self._update_line_numbers)  # redimensionar ventana
+
+        # ====== Panel derecho (tablas y controles) ======
+        right = ttk.Frame(self)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=8, pady=8)
+
+        btns = ttk.Frame(right); btns.pack(fill=tk.X)
+        ttk.Button(btns, text="Analizar (2 pasadas)", command=self.analizar).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(btns, text="Limpiar", command=self.limpiar).pack(side=tk.LEFT, padx=4, pady=4)
+
+        lf_tab = ttk.LabelFrame(right, text="Tabla de símbolos (Lexema / Tipo)")
+        lf_tab.pack(fill=tk.BOTH, expand=True, pady=(8, 6))
+        self.tree_sym = ttk.Treeview(lf_tab, columns=("lex", "tipo"), show="headings", height=16)
+        self.tree_sym.heading("lex", text="Lexema")
+        self.tree_sym.heading("tipo", text="Tipo de dato")
+        self.tree_sym.column("lex", width=260)
+        self.tree_sym.column("tipo", width=120)
+        self.tree_sym.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        lf_err = ttk.LabelFrame(right, text="Tabla de errores (2ª pasada)")
+        lf_err.pack(fill=tk.BOTH, expand=True)
+        self.tree_err = ttk.Treeview(lf_err, columns=("token","linea","lex","desc"), show="headings", height=16)
+        self.tree_err.heading("token", text="Token")
+        self.tree_err.heading("linea", text="Línea")
+        self.tree_err.heading("lex", text="Lexema (culpable)")
+        self.tree_err.heading("desc", text="Descripción")
+        self.tree_err.column("token", width=130)
+        self.tree_err.column("linea", width=60, anchor="e")
+        self.tree_err.column("lex", width=200)
+        self.tree_err.column("desc", width=420)
+        self.tree_err.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        help_lbl = ttk.Label(
+            right, justify="left",
+            text=("Autores:\n"
+                  "• Roger Fernando Gonzalez Pereira.\n"
+                  "• Aurora Vanessa Madera Canul.\n"
+                  "• Cristian Eduardo Medina Pech.\n")
+        ); help_lbl.pack(fill=tk.X, pady=8)
+
+        # Inicializa la numeración al arrancar
+        self._update_line_numbers()
+
+    def _on_modified(self, event=None):
+        # Evento de modificación virtual de Tk; hay que limpiar el flag para volver a dispararlo
+        self.txt.edit_modified(False)
+        self._update_line_numbers()
+
+    def _sync_yview(self, *args):
+        self.txt.yview(*args)
+        self.line_nums.yview(*args)
+
+    def _on_yscroll(self, *args, widget=None):
+        if widget is self.txt:
+            self.line_nums.yview_moveto(args[0])
+        else:
+            self.txt.yview_moveto(args[0])
+
+    def _update_line_numbers(self, event=None):
+        """Redibuja los números de línea a la izquierda."""
+        total = int(self.txt.index("end-1c").split(".")[0])
+        nums = "\n".join(str(i) for i in range(1, total + 1))
+        self.line_nums.configure(state="normal")
+        self.line_nums.delete("1.0", "end")
+        self.line_nums.insert("1.0", nums)
+        self.line_nums.configure(state="disabled")
+
+    # ====== lógica de análisis ======
+    def limpiar(self):
+        self.tree_sym.delete(*self.tree_sym.get_children())
+        self.tree_err.delete(*self.tree_err.get_children())
+
+    def analizar(self):
+        try:
+            self.limpiar()
+            texto = self.txt.get("1.0", tk.END)
+            tabla, errores = analizar_dos_pasadas(texto)
+
+            for lex, tipo in tabla:
+                self.tree_sym.insert("", tk.END, values=(lex, tipo))
+
+            for e in errores:
+                self.tree_err.insert("", tk.END, values=(e['token'], e['linea'], e['lex'], e['desc']))
+
+        except Exception as ex:
+            messagebox.showerror("Error", f"Ocurrió un error durante el análisis:\n{ex}")
+
+if __name__ == "__main__":
+    App().mainloop()
