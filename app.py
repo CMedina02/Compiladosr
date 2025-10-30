@@ -1,9 +1,10 @@
+# app.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from analyzer import analizar_y_triplos
 
 EJEMPLO = (
-    "E$ Pedro , Juan , Luis , i , Sofia1;\n"
+    "E$ Pedro , Juan , Luis , i , j , Sofia1;\n"
     "Pedro = 9;\n"
     "Juan = 2;\n"
     "Sofia1 = Pedro / 3 + 5;\n"
@@ -11,9 +12,7 @@ EJEMPLO = (
     "do{\n"
     "  Luis = Luis + 1 * 2;\n"
     "  Pedro = Pedro + 3 / 2;\n"
-    "  do{\n"
-    "    i = i + 1;\n"
-    "  } while (i < 5);\n"
+    "  do{ i = i + 1; } while (i < 5);\n"
     "} while (Pedro < 10 || Sofia1 > 8);\n"
 )
 
@@ -79,13 +78,14 @@ class App(tk.Tk):
         self.tree_err = ttk.Treeview(frame_err,
             columns=("token","linea","col","lex","desc"), show="headings", height=20)
         for h, w in (("token",130),("linea",60),("col",60),("lex",200),("desc",420)):
-            self.tree_err.heading(h, text=h.capitalize()); self.tree_err.column(h, width=w, anchor="e" if h in ("linea","col") else "w")
+            self.tree_err.heading(h, text=h.capitalize())
+            self.tree_err.column(h, width=w, anchor="e" if h in ("linea","col") else "w")
         self.tree_err.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         frame_tri = ttk.Frame(self.notebook); self.notebook.add(frame_tri, text="Triplos")
         self.tree_tri = ttk.Treeview(frame_tri, columns=("N","O","DO","DF"), show="headings", height=20)
         self.tree_tri.heading("N", text="N"); self.tree_tri.column("N", width=60, anchor="e")
-        for h, w in (("O",140),("DO",180),("DF",180)):
+        for h, w in (("O",140),("DO",220),("DF",220)):
             self.tree_tri.heading(h, text=h if h!="DO" else "D.O")
             self.tree_tri.column(h, width=w)
         self.tree_tri.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -129,9 +129,12 @@ class App(tk.Tk):
             tabla, errores, triplos = analizar_y_triplos(texto)
             self._last_triplos = triplos
 
-            for lex, tipo in tabla: self.tree_sym.insert("", tk.END, values=(lex, tipo))
+            for lex, tipo in tabla:
+                self.tree_sym.insert("", tk.END, values=(lex, tipo))
             for e in errores:
-                self.tree_err.insert("", tk.END, values=(e['token'], e['linea'], e['col'], e['lex'], e['desc']))
+                self.tree_err.insert("", tk.END, values=(e.get('token',''), e.get('linea',''),
+                                                         e.get('col',''), e.get('lex',''),
+                                                         e.get('desc','')))
             for n, o, do, df in triplos:
                 self.tree_tri.insert("", tk.END, values=(n, o, do, df))
 
