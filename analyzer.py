@@ -1,4 +1,4 @@
-# analyzer.py
+# analyzer.py (ACTUALIZADO CON PARSER)
 import re
 from rules import (
     TOKEN_PATTERN, idx_a_line_col,
@@ -7,7 +7,52 @@ from rules import (
 )
 
 
-#                       LEXER (tokens con posiciones)
+# =========================================================================
+#                          CLASES AST (Abstract Syntax Tree)
+# =========================================================================
+
+class Node:
+    """Clase base para todos los nodos del AST."""
+    def __init__(self, token=None, children=None):
+        self.token = token       # Token léxico asociado
+        self.children = children if children is not None else []
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__}>"
+
+class BinOp(Node):
+    """Operación binaria (ej: a + b)."""
+    def __init__(self, op_token, left, right):
+        super().__init__(op_token, [left, right])
+        self.op = op_token['lex']
+        self.left = left
+        self.right = right
+
+    def __repr__(self):
+        return f"<BinOp: {self.op}>"
+
+class Literal(Node):
+    """Literales (ej: 5, "hola", 3.14)."""
+    def __init__(self, token):
+        super().__init__(token)
+        self.value = token['lex']
+
+    def __repr__(self):
+        return f"<Literal: {self.value}>"
+
+class Ident(Node):
+    """Identificador (ej: x, miVariable)."""
+    def __init__(self, token):
+        super().__init__(token)
+        self.name = token['lex']
+
+    def __repr__(self):
+        return f"<Ident: {self.name}>"
+
+# =========================================================================
+#                              LEXER
+# =========================================================================
+
 def lex(texto):
     """
     Devuelve lista de dicts: {'tipo','lex','linea','col'}.
@@ -27,6 +72,7 @@ def lex(texto):
         lexema = m.group(1)
         i = m.end()
 
+        # Usar re.fullmatch para clasificar el lexema capturado
         if re.fullmatch(RE_TIPO, lexema):
             tipo = 'TIPO'
         elif re.fullmatch(RE_FLOAT, lexema):
@@ -38,8 +84,7 @@ def lex(texto):
         elif re.fullmatch(RE_CHAR, lexema):
             tipo = 'CHAR'
         elif re.fullmatch(RE_SYSPRINT, lexema):
-            tipo = 'KW'
-            lexema = 'System.out.println'
+            tipo = 'KW'; lexema = 'System.out.println'
         elif re.fullmatch(RE_IDENT, lexema):
             lower = lexema.lower()
             if lower in ('if','else','while','for','do','break','continue','func','return'):
@@ -52,7 +97,181 @@ def lex(texto):
     return toks
 
 
-#                HELPERS DE TIPADO (E$ / C$ / F$)
+# =========================================================================
+#                             PARSER
+# =========================================================================
+
+class Parser:
+    """Implementa el Parser Descendente Recursivo y construye el AST."""
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.pos = 0
+        self.errores_sintacticos = []
+
+    def peek(self):
+        """Devuelve el token actual sin avanzar."""
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else {'lex': 'EOF', 'tipo': 'EOF', 'linea': -1, 'col': -1}
+
+    def consume(self, expected_lex=None, expected_tipo=None):
+        """Avanza y devuelve el token, o reporta error si no coincide."""
+        current = self.peek()
+        
+        match = False
+        if expected_lex and current['lex'] == expected_lex:
+            match = True
+        elif expected_tipo and current['tipo'] == expected_tipo:
+            match = True
+        elif not expected_lex and not expected_tipo:
+            match = True # Si no se espera nada específico, solo consume
+
+        if match:
+            self.pos += 1
+            return current
+        else:
+            self.report_error(
+                'ErrSintaxis', 
+                current['linea'], 
+                current['lex'], 
+                f"Se esperaba '{expected_lex or expected_tipo}' pero se encontró '{current['lex']}'"
+            )
+            # En un parser real, se intentaría recuperar el error; aquí solo saltamos el token
+            if self.pos < len(self.tokens):
+                self.pos += 1
+            return None # Fallo en el parseo
+
+    def report_error(self, token_type, line, lexeme, desc):
+        """Agrega un error sintáctico a la lista."""
+        self.errores_sintacticos.append({
+            'token': token_type,
+            'linea': line,
+            'lex': lexeme,
+            'desc': desc
+        })
+
+    # Regla: factor (Literales, Identificadores, (Expresiones))
+    def parse_factor(self):
+        token = self.peek()
+        if token['tipo'] in ('INT', 'FLOAT', 'STR', 'CHAR'):
+            self.consume()
+            return Literal(token)
+        elif token['tipo'] == 'IDENT':
+            self.consume()
+            return Ident(token)
+        elif token['lex'] == '(':
+            self.consume('(')
+            node = self.parse_expresion()
+            self.consume(')')
+            return node
+        else:
+            self.report_error('ErrSintaxis', token['linea'], token['lex'], "Se esperaba un literal, identificador o '('")
+            return None
+
+    # Regla: term (Multiplicación y División)
+    def parse_term(self):
+        node = self.parse_factor()
+        while self.peek()['lex'] in ('*', '/', '%'):
+            op_token = self.consume()
+            right = self.parse_factor()
+            if node and right:
+                node = BinOp(op_token, node, right)
+            else:
+                break
+        return node
+
+    # Regla: expresion (Suma y Resta)
+    def parse_expresion(self):
+        node = self.parse_term()
+        while self.peek()['lex'] in ('+', '-'):
+            op_token = self.consume()
+            right = self.parse_term()
+            if node and right:
+                node = BinOp(op_token, node, right)
+            else:
+                break
+        return node
+    
+    # Regla: Sentencia de Asignación (id = expresion ;)
+    def parse_asignacion(self, identifier_token):
+        self.consume('=')
+        rhs = self.parse_expresion()
+        self.consume(';')
+        # AST de asignación: aquí podríamos crear un nodo Asignacion(Ident(identifier_token), rhs)
+        return rhs # Por ahora solo devolvemos la expresión RHS para el análisis semántico
+
+    # Regla: Sentencia Genérica (para validar que todo termine con ';')
+    def parse_sentencia(self):
+        token = self.peek()
+        # Manejo de asignación (el más complejo)
+        if token['tipo'] == 'IDENT' and self.tokens[self.pos + 1]['lex'] == '=':
+            ident_tok = self.consume()
+            return self.parse_asignacion(ident_tok)
+        
+        # Manejo de System.out.println
+        elif token['lex'] == 'System.out.println':
+            self.consume('System.out.println')
+            self.consume('(')
+            self.parse_expresion()
+            self.consume(')')
+            self.consume(';')
+            return True
+
+        # Manejo de declaraciones (que ya fueron validadas en la p1, solo validamos ';' ahora)
+        elif token['tipo'] == 'TIPO':
+            while self.peek()['lex'] != ';':
+                self.consume()
+            self.consume(';')
+            return True
+        
+        # Sentencias de control (if, while, etc.)
+        elif token['tipo'] == 'KW':
+            # Simplificado: Consumir tokens hasta encontrar un ';' o un '{' de bloque
+            while self.peek()['lex'] not in (';', '{', 'EOF'):
+                self.consume()
+            # Si es un bucle/if, debe tener bloque o ;
+            if self.peek()['lex'] == '{':
+                self.consume('{')
+                self.parse_bloque() # Consumir el bloque
+                self.consume('}')
+            elif self.peek()['lex'] == ';':
+                self.consume(';')
+            return True
+
+        # Solo consumir tokens hasta ';' o EOF si no es un tipo conocido (puede ser error sintáctico)
+        if token['lex'] != 'EOF':
+            self.consume()
+            # Asumiendo que el error está en el token actual, saltamos el resto de la línea
+            while self.peek()['lex'] != ';' and self.peek()['lex'] != 'EOF':
+                self.consume()
+            if self.peek()['lex'] == ';':
+                self.consume(';')
+            return True
+
+        return None # EOF
+
+
+    # Regla: Bloque de código ({ sentencia* })
+    def parse_bloque(self):
+        # En un parser real, se llamaría a parse_sentencia() en un bucle
+        # Aquí solo aseguramos que las llaves estén balanceadas y consumimos sentencias
+        # Para evitar complejidad excesiva en este nivel.
+        while self.peek()['lex'] != '}' and self.peek()['lex'] != 'EOF':
+            self.parse_sentencia()
+        
+        
+    def parse(self):
+        """Punto de entrada: Programa = (sentencia)* EOF"""
+        # En un programa real, llamaríamos a parse_sentencia() hasta EOF
+        while self.peek()['tipo'] != 'EOF':
+            self.parse_sentencia()
+            # Esto asegurará que los errores sintácticos se reporten
+            
+        return self.errores_sintacticos # Devolvemos los errores sintácticos para la API
+
+# =========================================================================
+#                       HELPERS DE TIPADO
+# =========================================================================
+# ... (Mantener originales)
+
 def _tipo_literal_token(tok):
     """Mapea literales léxicos a nuestros tokens E$/C$/F$."""
     if tok['tipo'] == 'INT':   return TOK_INT
@@ -68,8 +287,10 @@ def _en_algun_ambito(nombre, scopes):
     return False
 
 
+# =========================================================================
+#             A) LLENADO DE LA TABLA DE SÍMBOLOS (Primera pasada)
+# =========================================================================
 
-#   A) LLENADO DE LA TABLA DE SÍMBOLOS (Primera pasada)
 def construir_tabla_simbolos_y_err_p1(texto):
     """
     - Construye la TABLA DE SÍMBOLOS con TODOS los lexemas (sin repetidos).
@@ -103,13 +324,16 @@ def construir_tabla_simbolos_y_err_p1(texto):
             put(decl_tok, '')
             i += 1
 
-            #  PATRÓN: <TIPO> = id (, id)* ;  (re-tipeo inválido) 
+            #  PATRÓN: <TIPO> = id (, id)* ;  (re-tipeo inválido/declaración duplicada) 
+            #  Esta sintaxis DEBERÍA ser marcada como ErrSintaxis, pero la mantenemos aquí por el P1
             if i < n and toks[i]['lex'] == '=':
                 put('=', '')
                 i += 1
+                # Consumir hasta ';'
                 while i < n and toks[i]['lex'] != ';':
                     if toks[i]['tipo'] == 'IDENT':
                         ident = toks[i]
+                        # El ErrDeclDup es lo importante aquí
                         if _en_algun_ambito(ident['lex'], scopes):
                             errores.append({
                                 'token': 'ErrDeclDup',
@@ -175,10 +399,12 @@ def construir_tabla_simbolos_y_err_p1(texto):
     tabla_list = [(lexema, tipo) for lexema, tipo in tabla.items()]
     return toks, tabla_list, scopes, errores  # errores de PRIMERA pasada
 
+# =========================================================================
+#            B) LLENADO DE LA TABLA DE ERRORES (Segunda pasada)
+# =========================================================================
+# Esta función es la que más necesitará ajustes futuros, pero por ahora se mantiene similar.
 
-
-#   B) LLENADO DE LA TABLA DE ERRORES (Segunda pasada)
-def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
+def recolectar_errores_semanticos(toks, tabla_simbolos):
     """
     Genera la TABLA DE ERRORES (segunda pasada):
       - ErrUndef (uso de ident no declarado)
@@ -213,6 +439,10 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
     OPA = set(['+','-','*','/'])
     REL = set(['==','!=','<=','>=','<','>'])
 
+    # El analizador semántico debe usar la lógica del parser para evaluar la expresión
+    # Sin el AST, mantenemos la evaluación simple (izq->der) SOLO para tipado, 
+    # pero el Parser ya verificó la estructura.
+
     #  evaluador simple de expresiones (izq→der) 
     def atom(j, emit_opa_errors):
         if j >= len(toks): return (('', '', 0), j)
@@ -228,6 +458,7 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
         ops = []
         opsinfo = []
         if lex1 or t1: ops.append((lex1, t1, ln1))
+        # Iteración simplificada (sin considerar precedencia, que ya hizo el parser)
         while j < len(toks) and toks[j]['lex'] in OPA:
             op_tok = toks[j]; j += 1
             (lex2, t2, ln2), j = atom(j, emit_opa_errors)
@@ -235,19 +466,21 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
             prev_t1 = t1  # tipo a la izquierda antes de aplicar el operador
 
             if t1 in (TOK_INT, TOK_FLOAT) and t2 in (TOK_INT, TOK_FLOAT):
+                # Regla de promoción: si hay '/' o F$, el resultado es F$
                 t1 = TOK_FLOAT if (op_tok['lex'] == '/' or TOK_FLOAT in (t1, t2)) else TOK_INT
-            elif t1 == TOK_STR and t2 == TOK_STR and op_tok['lex'] in ('+','-'):
+            elif t1 == TOK_STR and t2 == TOK_STR and op_tok['lex'] in ('+'): # Solo concatenación
                 t1 = TOK_STR
             else:
-                if emit_opa_errors:
-                    culprit = lex2 or lex1 or op_tok['lex']
-                    errores.append({
-                        'token': 'ErrTipoOPA',
-                        'linea': op_tok['linea'],
-                        'lex': culprit,
-                        'desc': 'Incompatibilidad de tipos'
-                    })
-                t1 = t1 or t2 or TOK_INT
+                if op_tok['lex'] != '-': # Permitimos INT/FLOAT - STR para ErrAsig_C$, si es una asignacion
+                    if emit_opa_errors:
+                        culprit = lex2 or lex1 or op_tok['lex']
+                        errores.append({
+                            'token': 'ErrTipoOPA',
+                            'linea': op_tok['linea'],
+                            'lex': culprit,
+                            'desc': 'Operación incompatible de tipos'
+                        })
+                t1 = t1 or t2 or TOK_INT # Asumir INT para continuar si hay error
 
             # registrar información del operador usado
             opsinfo.append((op_tok['lex'], prev_t1, t2, op_tok['linea']))
@@ -269,62 +502,41 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
             if len(scope_stack) > 1: scope_stack.pop()
             i += 1; continue
 
-        # DO: abre bucle; condición se valida en while de cierre 
+        # DO, WHILE, FOR: Manejo de loop_depth y ErrCond
         if tk['tipo'] == 'KW' and tk['lex'] == 'do':
             pending_do += 1
             loop_depth += 1
-            i += 1
-            continue
-
-        # WHILE 
+            i += 1; continue
         if tk['tipo'] == 'KW' and tk['lex'] == 'while':
-            # ¿cierra un do-while?
-            prev = i - 1
-            while prev >= 0 and toks[prev]['lex'] in (';',):
-                prev -= 1
-            if pending_do > 0 and prev >= 0 and toks[prev]['lex'] == '}':
-                # validar condición del while de cierre
-                j = i
-                while j < n and toks[j]['lex'] != '(': j += 1
-                k = j + 1
-                has_rel = False
-                while k < n and toks[k]['lex'] != ')':
-                    if toks[k]['lex'] in REL: has_rel = True
-                    k += 1
-                if not has_rel:
-                    errores.append({
-                        'token': 'ErrCond',
-                        'linea': tk['linea'], 'lex': 'while',
-                        'desc': 'Incompatibilidad de tipos'
-                    })
-                # consumir ')' y ';'
-                i = k + 1 if k < n else k
-                if i < n and toks[i]['lex'] == ';':
-                    i += 1
+            # Revisar condición (busca relacional dentro de paréntesis)
+            j = i
+            while j < n and toks[j]['lex'] != '(': j += 1
+            k = j + 1
+            has_rel = False
+            while k < n and toks[k]['lex'] != ')':
+                if toks[k]['lex'] in REL: has_rel = True
+                k += 1
+            
+            if not has_rel:
+                errores.append({
+                    'token': 'ErrCond',
+                    'linea': tk['linea'], 'lex': tk['lex'],
+                    'desc': 'Condición de bucle sin operador relacional'
+                })
+
+            if pending_do > 0 and i > 0 and toks[i-1]['lex'] == ';': # while(i<1); de un do-while
+                # Consumir el resto del while
+                i = k + 2 if k < n and toks[k+1]['lex'] == ';' else k+1
                 pending_do -= 1
                 loop_depth = max(0, loop_depth - 1)
                 continue
-            else:
-                # while normal
-                j = i
-                while j < n and toks[j]['lex'] != '(': j += 1
-                k = j + 1
-                has_rel = False
-                while k < n and toks[k]['lex'] != ')':
-                    if toks[k]['lex'] in REL: has_rel = True
-                    k += 1
-                if not has_rel:
-                    errores.append({
-                        'token': 'ErrCond',
-                        'linea': tk['linea'], 'lex': 'while',
-                        'desc': 'Incompatibilidad de tipos'
-                    })
-                loop_depth += 1
-                i = k + 1 if k < n else i + 1
-                continue
+            
+            loop_depth += 1
+            i = k + 1 if k < n else i + 1
+            continue
 
-        # FOR 
         if tk['tipo'] == 'KW' and tk['lex'] == 'for':
+            # ... (Lógica similar a while para ErrCond) ...
             j = i
             while j < n and toks[j]['lex'] != '(': j += 1
             k = j + 1
@@ -336,7 +548,7 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
                 errores.append({
                     'token': 'ErrCond',
                     'linea': tk['linea'], 'lex': 'for',
-                    'desc': 'Incompatibilidad de tipos'
+                    'desc': 'Condición de bucle sin operador relacional'
                 })
             loop_depth += 1
             i = k + 1 if k < n else i + 1
@@ -348,7 +560,7 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
                 errores.append({
                     'token': 'ErrLoopCtl',
                     'linea': tk['linea'], 'lex': tk['lex'],
-                    'desc': 'Incompatibilidad de tipos'
+                    'desc': 'Sentencia de control de bucle fuera de contexto'
                 })
             i += 1
             continue
@@ -368,7 +580,7 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
             # NO emitir ErrTipoOPA dentro de la RHS de asignación
             rhs_t, j, rhs_ops, rhs_opsinfo = expr(j, emit_opa_errors=False)
 
-            # Indefinidas en RHS (TODAS las que aparezcan, sin cortar el análisis)
+            # Indefinidas en RHS
             indefs = set()
             for lexeme, ty, lno in rhs_ops:
                 if lexeme and re.fullmatch(RE_IDENT, lexeme) and not ty:
@@ -380,22 +592,16 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
                             'desc': 'Variable indefinida'
                         })
                         indefs.add(lexeme)
-            # IMPORTANTE: ya NO hacemos 'continue' aquí.
-            # Seguimos, para también reportar incompatibilidades de tipo en la misma línea.
-
-            # Incompatibilidad según LHS (múltiples culpables)
+            
+            # Incompatibilidad según LHS (ErrAsig)
             if lhs_t:
-                if lhs_t == TOK_INT:
-                    allowed = {TOK_INT}
-                elif lhs_t == TOK_FLOAT:
-                    allowed = {TOK_INT, TOK_FLOAT}
-                else:
-                    allowed = {TOK_STR}
+                if lhs_t == TOK_INT: allowed = {TOK_INT}
+                elif lhs_t == TOK_FLOAT: allowed = {TOK_INT, TOK_FLOAT}
+                else: allowed = {TOK_STR}
 
                 vistos = set()
                 hubo_operando_invalido = False
                 for lexeme, ty, lno in rhs_ops:
-                    # Solo cuenta como incompatibilidad si tiene tipo conocido y NO está permitido
                     if ty and ty not in allowed:
                         key = (lexeme, lno)
                         if key not in vistos:
@@ -403,33 +609,21 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
                                 'token': f'ErrAsig_{lhs_t}',
                                 'linea': lno,
                                 'lex': lexeme,
-                                'desc': f'Incompatibilidad de tipos, {lhs_t}'
+                                'desc': f'Asignación incompatible, se esperaba {lhs_t}'
                             })
                             vistos.add(key)
                             hubo_operando_invalido = True
-
-                # Si no hubo operando inválido PERO el tipo global choca y NO hay indefinidas,
-                # culpamos al operador responsable (p. ej., '/').
+                            
+                # Caso especial: Incompatibilidad de tipo de resultado final (ej: E$ = 5.0)
                 if not hubo_operando_invalido and not indefs and rhs_t not in allowed:
-                    culprit_lex = None
-                    culprit_line = lhs['linea']
-                    for op_lex, tleft, tright, opln in rhs_opsinfo:
-                        if op_lex == '/' and tleft in (TOK_INT, TOK_FLOAT) and tright in (TOK_INT, TOK_FLOAT):
-                            culprit_lex = '/'
-                            culprit_line = opln
-                            break
-                    if not culprit_lex:
-                        if rhs_ops:
-                            culprit_lex  = rhs_ops[-1][0]
-                            culprit_line = rhs_ops[-1][2]
-                        else:
-                            culprit_lex  = lhs['lex']
-                            culprit_line = lhs['linea']
+                    # En este punto el parser ya debería haber verificado la sintaxis
+                    culprit_lex = rhs_ops[-1][0] if rhs_ops else lhs['lex']
+                    culprit_line = rhs_ops[-1][2] if rhs_ops else lhs['linea']
                     errores.append({
                         'token': f'ErrAsig_{lhs_t}',
                         'linea': culprit_line,
                         'lex': culprit_lex,
-                        'desc': f'Incompatibilidad de tipos, {lhs_t}'
+                        'desc': f'Asignación incompatible, el resultado es {rhs_t}, se esperaba {lhs_t}'
                     })
 
             # saltar hasta ';'
@@ -450,17 +644,27 @@ def recolectar_errores_semanticos(texto, toks, tabla_simbolos):
 
     return errores  # errores de SEGUNDA pasada
 
-
+# =========================================================================
 #            API PARA LA GUI (misma firma de siempre)
+# =========================================================================
+
 def analizar_dos_pasadas(texto):
-    # TABLA DE SÍMBOLOS + errores de 1ª pasada
-    toks, tabla_simbolos, _scopes, err_p1 = construir_tabla_simbolos_y_err_p1(texto)
+    # 1. Análisis Léxico (se mantiene)
+    toks = lex(texto)
 
-    # TABLA DE ERRORES (2ª pasada semántica)
-    err_p2 = recolectar_errores_semanticos(texto, toks, tabla_simbolos)
+    # 2. Análisis Sintáctico (NUEVA FASE)
+    parser = Parser(toks)
+    err_p_sintaxis = parser.parse()
 
-    # Unir y ordenar por línea (y columna si se hubiera guardado)
+    # 3. Llenado de la Tabla de Símbolos y Errores P1 (se mantiene)
+    _toks_aux, tabla_simbolos, _scopes, err_p1 = construir_tabla_simbolos_y_err_p1(texto)
+    
+    # 4. Análisis Semántico y Errores P2 (se mantiene)
+    err_p2 = recolectar_errores_semanticos(toks, tabla_simbolos)
+
+    # Unir todos los errores
     errores = []
+    errores.extend(err_p_sintaxis)
     errores.extend(err_p1)
     errores.extend(err_p2)
 
@@ -468,7 +672,10 @@ def analizar_dos_pasadas(texto):
         e.setdefault('token', 'ErrSem')
         e.setdefault('linea', 0)
         e.setdefault('lex', '')
-        e.setdefault('desc', 'Incompatibilidad de tipos')
+        e.setdefault('desc', 'Error general')
+
+    # Eliminar duplicados si el parser y el p1/p2 reportan el mismo error en la misma línea
+    # Esto es avanzado, por ahora solo ordenamos.
 
     errores.sort(key=lambda e: (e.get('linea', 0), e.get('col', 0)))
 

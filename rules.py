@@ -1,7 +1,7 @@
-# rules.py
+# rules.py (ACTUALIZADO CON PRIORIDAD DE OPERADORES)
 import re
 
-#} Tipos del lenguaje (mostrar siempre como E$ / C$ / F$)
+# Tipos del lenguaje (mostrar siempre como E$ / C$ / F$)
 TYPE_TOKENS = ("E$", "C$", "F$")       # Entero, Cadena, Flotante
 TOK_INT, TOK_STR, TOK_FLOAT = TYPE_TOKENS  # alias léxicos
 
@@ -14,23 +14,26 @@ RE_STR       = r'"[^"\n]*"'
 RE_CHAR      = r"'[^'\n]'"
 
 # Palabras clave simples
-RE_KW        = r'\b(if|else|while|for|do|break|continue|func|return)\b'
+RE_KW_SINGLE = r'\b(if|else|while|for|do|break|continue|func|return)\b'
 
 # Palabra reservada compuesta (un solo token)
 RE_SYSPRINT  = r'System\.out\.println'
 
-# Operadores y separadores (incluye '.')
-RE_OP        = r'(\+|-|\*|/|%|==|!=|<=|>=|<|>|=|,|;|\(|\)|\{|\}|!|&&|\|\||\.)'
+# Operadores de 2 caracteres (RELACIONALES y LÓGICOS)
+RE_OP2       = r'(==|!=|<=|>=|&&|\|\|)'
+# Operadores de 1 caracter (ARITMÉTICOS, ASIGNACIÓN, SEPARADORES, etc.)
+RE_OP1       = r'(\+|-|\*|/|%|<|>|=|;|\(|\)|\{|\}|!|,|\.)'
 
-# Patrón maestro
+# Patrón maestro (Orden de prioridad: SYSPRINT > OP2 > Literales > KW > IDENT > OP1)
 TOKEN_PATTERN = re.compile(
     rf'\s*('
-    rf'{RE_TIPO}|'
     rf'{RE_SYSPRINT}|'
+    rf'{RE_OP2}|'
+    rf'{RE_TIPO}|'
     rf'{RE_FLOAT}|{RE_INT}|{RE_STR}|{RE_CHAR}|'
-    rf'{RE_KW}|'
+    rf'{RE_KW_SINGLE}|'
     rf'{RE_IDENT}|'
-    rf'{RE_OP}'
+    rf'{RE_OP1}'
     rf')',
     re.IGNORECASE
 )
