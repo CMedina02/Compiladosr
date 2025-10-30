@@ -688,3 +688,308 @@ def analizar_dos_pasadas(texto):
     errores.sort(key=lambda e: (e.get('linea', 0), e.get('col', 0)))
 
     return tabla_simbolos, errores
+
+# =========================================================================
+#                   GENERADOR DE TRIPLOS (prefijo, CSV-like)
+# =========================================================================
+# Reglas:
+# - Formato de fila: (N, O, DO, DF)
+# - Aritméticos: + - * / %
+# - Asignación: '='
+# - Relacionales: == != < <= > >=
+# - Lógicos: && ||
+# - Unario '-' soportado solo como "- <número|ident>" => se emite "T=0 ; - T x"
+# - do { ... } while (cond) con cortocircuito real.
+# - Saltos: filas "TRUE,<n>" y "FALSE,<n>" donde <n> es el número N de fila destino.
+# - No se generan filas para System.out.println ni declaraciones.
+
+ARIT_OPS = {"+","-","*","/","%"}
+REL_OPS  = {"==","!=", "<","<=",">",">="}
+LOG_OPS  = {"&&","||"}
+
+class TriploEmitter:
+    def __init__(self):
+        self.rows = []          # lista de dicts {'N','O','DO','DF'}
+        self.N = 0              # contador de N
+        self._end_patches = []  # lugares a parchar con N final de cada do-while
+        self.temp_counter = 0   # T1, T2... (se reinicia por expresión)
+
+    # -------------- primitivas --------------
+    def _nextN(self):
+        self.N += 1
+        return self.N
+
+    def emit(self, O, DO="", DF=""):
+        n = self._nextN()
+        self.rows.append({"N":n, "O":O, "DO":DO, "DF":DF})
+        return n
+
+    def newT(self):
+        self.temp_counter += 1
+        return f"T{self.temp_counter}"
+
+    def resetTemps(self):
+        self.temp_counter = 0
+
+    # -------------- helpers de lectura --------------
+    @staticmethod
+    def _is_num(tok):  # INT o FLOAT
+        return tok["tipo"] in ("INT","FLOAT")
+
+    @staticmethod
+    def _is_id(tok):
+        return tok["tipo"] == "IDENT"
+
+    @staticmethod
+    def _is_lit_or_id(tok):
+        return tok["tipo"] in ("INT","FLOAT","STR","CHAR","IDENT")
+
+    # -------------- parse expr (RD reducido, respeta precedencia * / % > + -) --------------
+    # Devuelve el TEMP que contiene el resultado y la posición final k
+    def _gen_factor(self, toks, i):
+        # Soporte de unario '-' : si vemos '-' seguido de literal/ident o '('
+        if i < len(toks) and toks[i]["lex"] == "-":
+            # unario
+            i += 1
+            tname, i = self._gen_factor(toks, i)
+            t0 = self.newT()
+            self.emit("=", t0, "0")
+            self.emit("-", t0, tname)
+            return t0, i
+
+        tk = toks[i]
+        if tk["lex"] == "(":
+            tname, j = self._gen_expr(toks, i+1)
+            # consumir ')'
+            k = j
+            while k < len(toks) and toks[k]["lex"] != ")": k += 1
+            return tname, (k+1 if k < len(toks) else k)
+
+        if self._is_lit_or_id(tk):
+            t = self.newT()
+            self.emit("=", t, tk["lex"])
+            return t, i+1
+
+        # token inesperado: emitir igual para no romper flujo
+        t = self.newT()
+        self.emit("=", t, tk["lex"])
+        return t, i+1
+
+    def _gen_term(self, toks, i):
+        leftT, k = self._gen_factor(toks, i)
+        while k < len(toks) and toks[k]["lex"] in ("*","/","%"):
+            op = toks[k]["lex"]; k += 1
+            rightT, k = self._gen_factor(toks, k)
+            # prefijo: op Tleft Tright  -> acumulamos en Tleft
+            self.emit(op, leftT, rightT)
+        return leftT, k
+
+    def _gen_expr(self, toks, i):
+        leftT, k = self._gen_term(toks, i)
+        while k < len(toks) and toks[k]["lex"] in ("+","-"):
+            op = toks[k]["lex"]; k += 1
+            rightT, k = self._gen_term(toks, k)
+            self.emit(op, leftT, rightT)
+        return leftT, k
+
+    # -------------- asignación --------------
+    def gen_assignment(self, lhs_lex, rhs_tokens):
+        self.resetTemps()
+        tname, _ = self._gen_expr(rhs_tokens, 0)
+        self.emit("=", lhs_lex, tname)
+
+    # -------------- relacional simple: A rel B --------------
+    # Devuelve: (tempDeComparación, startN de esta comparacion)
+    def gen_rel(self, rel_tokens):
+        self.resetTemps()
+        # dividir por primer operador relacional
+        j = 0
+        relop = None
+        for j in range(len(rel_tokens)):
+            if rel_tokens[j]["lex"] in REL_OPS:
+                relop = rel_tokens[j]["lex"]
+                break
+        if relop is None:
+            # no hay relacional => evaluar como expr != 0 (convención mínima)
+            t, _ = self._gen_expr(rel_tokens, 0)
+            self.emit("!=", t, "0")
+            return t, None
+
+        left = rel_tokens[:j]
+        right = rel_tokens[j+1:]
+
+        tleft, _ = self._gen_expr(left, 0)
+        # right puede ser expr
+        tright, _ = self._gen_expr(right, 0)
+        self.emit(relop, tleft, tright)  # p.ej. "<, T1, T2"
+        return tleft, None
+
+    # -------------- condición con cortocircuito y saltos TRUE/FALSE numéricos --------------
+    # cond_tokens admite:  (rel)  |  (rel) || (rel)  |  (rel) && (rel)
+    # Retorna: lista de índices a parchar a fin con N_end (para FALSE final)
+    def gen_condition_do_while(self, cond_tokens, N_body):
+        # tokenizar por '||' o '&&' (al nivel superior)
+        # asumimos formato simple como acordado
+        logic = None
+        split_at = -1
+        depth = 0
+        for idx, tk in enumerate(cond_tokens):
+            if tk["lex"] == "(": depth += 1
+            elif tk["lex"] == ")": depth -= 1
+            elif depth == 0 and tk["lex"] in ("||","&&"):
+                logic = tk["lex"]; split_at = idx; break
+
+        if logic is None:
+            # solo relacional
+            t, _s = self.gen_rel(cond_tokens)
+            # TRUE -> body ; FALSE -> end (pendiente)
+            n_true = self.emit("TRUE", str(N_body), "")
+            n_false = self.emit("FALSE", "PENDING_END", "")
+            return [n_false]
+        else:
+            left = cond_tokens[:split_at]
+            right = cond_tokens[split_at+1:]
+
+            if logic == "||":
+                # A OR B:
+                # eval A
+                tA, _ = self.gen_rel(left)
+                # TRUE -> body ; FALSE -> (inicio de B)
+                n_true1 = self.emit("TRUE", str(N_body), "")
+                # reservar salto a inicio de B con el siguiente N+1 (se conoce ahora)
+                start_B = self.N + 1
+                n_false1 = self.emit("FALSE", str(start_B), "")
+
+                # eval B
+                tB, _ = self.gen_rel(right)
+                # TRUE -> body ; FALSE -> END (pendiente)
+                n_true2 = self.emit("TRUE", str(N_body), "")
+                n_false2 = self.emit("FALSE", "PENDING_END", "")
+                return [n_false2]
+
+            else:
+                # A AND B (sin '!'):
+                # eval A
+                tA, _ = self.gen_rel(left)
+                # Si A es FALSE -> END (pendiente)
+                n_false1 = self.emit("FALSE", "PENDING_END", "")
+                # Si A es TRUE -> evaluar B (siguiente N ya es inicio de B)
+                # (no necesitamos fila TRUE aquí)
+                # eval B
+                tB, _ = self.gen_rel(right)
+                # TRUE -> BODY ; FALSE -> END (pendiente)
+                n_true2  = self.emit("TRUE",  str(N_body), "")
+                n_false2 = self.emit("FALSE", "PENDING_END", "")
+                return [n_false1, n_false2]
+
+def _slice_until(tokens, i, stop_lexes):
+    j = i
+    while j < len(tokens) and tokens[j]["lex"] not in stop_lexes:
+        j += 1
+    return tokens[i:j], j
+
+def _strip_parens(tokens):
+    if len(tokens) >= 2 and tokens[0]["lex"] == "(" and tokens[-1]["lex"] == ")":
+        # intentar quitar un par externo
+        depth = 0
+        ok = True
+        for k, tk in enumerate(tokens):
+            if tk["lex"] == "(": depth += 1
+            elif tk["lex"] == ")":
+                depth -= 1
+                if depth == 0 and k != len(tokens)-1:
+                    ok = False; break
+        if ok:
+            return tokens[1:-1]
+    return tokens
+
+def generar_triplos(texto):
+    toks = lex(texto)
+    em = TriploEmitter()
+    i, n = 0, len(toks)
+
+    # Para backpatch de múltiples do-while anidados
+    end_patch_stacks = []
+
+    while i < n:
+        tk = toks[i]
+
+        # --- do { ... } while (cond) ; ---
+        if tk["tipo"] == "KW" and tk["lex"] == "do":
+            i += 1
+            # debe venir '{'
+            if i < n and toks[i]["lex"] == "{":
+                i += 1
+                # cuerpo: recordamos el N inicial del cuerpo
+                body_start_N = em.N + 1  # próxima fila será la primera del cuerpo
+
+                # consumir sentencias hasta '}'
+                while i < n and not (toks[i]["lex"] == "}"):
+                    # Asignaciones dentro del cuerpo
+                    if i+1 < n and toks[i]["tipo"] == "IDENT" and toks[i+1]["lex"] == "=":
+                        lhs = toks[i]["lex"]; i += 2
+                        rhs, j = _slice_until(toks, i, {";", "}"})
+                        em.gen_assignment(lhs, rhs)
+                        i = j
+                        if i < n and toks[i]["lex"] == ";": i += 1
+                    else:
+                        i += 1  # ignorar cualquier cosa no soportada
+
+                # cerrar cuerpo con '}'
+                if i < n and toks[i]["lex"] == "}": i += 1
+
+                # esperar 'while (cond) ;'
+                if i < n and toks[i]["tipo"] == "KW" and toks[i]["lex"] == "while":
+                    i += 1
+                    if i < n and toks[i]["lex"] == "(":
+                        # tomar la condición completa hasta ')'
+                        j = i + 1; depth = 1
+                        while j < n and depth > 0:
+                            if toks[j]["lex"] == "(": depth += 1
+                            elif toks[j]["lex"] == ")": depth -= 1
+                            j += 1
+                        cond_tokens = toks[i+1:j-1]  # entre paréntesis
+                        cond_tokens = _strip_parens(cond_tokens)
+
+                        # generar saltos TRUE/FALSE con num de fila
+                        patches = em.gen_condition_do_while(cond_tokens, body_start_N)
+                        end_patch_stacks.append((patches, len(em.rows)))  # recordar hasta dónde
+
+                        # consumir ');'
+                        i = j
+                        if i < n and toks[i]["lex"] == ";": i += 1
+                continue
+
+        # --- Asignación simple fuera de do-while ---
+        if i+1 < n and tk["tipo"] == "IDENT" and toks[i+1]["lex"] == "=":
+            lhs = toks[i]["lex"]; i += 2
+            rhs, j = _slice_until(toks, i, {";", "}"})
+            em.gen_assignment(lhs, rhs)
+            i = j
+            if i < n and toks[i]["lex"] == ";": i += 1
+            continue
+
+        i += 1
+
+    # Backpatch global: todas las filas con "PENDING_END" apuntan a la primera
+    # fila después del último triplo del bucle correspondiente (N+1 al cierre).
+    # Como usamos filas planas, el "end" natural es N+1 del momento en que termina el bucle.
+    # Aquí, tras haber generado todo, el destino final de salida es em.N + 1
+    finalNplus1 = em.N + 1
+    for row in em.rows:
+        if row["O"] in ("TRUE","FALSE") and row["DO"] == "PENDING_END":
+            row["DO"] = str(finalNplus1)
+
+    # Devolver como lista de tuplas para CSV: (N,O,DO,DF)
+    triplos = [(r["N"], r["O"], r["DO"], r["DF"]) for r in em.rows]
+    return triplos
+
+
+# =========================================================================
+#            API combinada para la GUI: símbolos, errores y triplos
+# =========================================================================
+
+def analizar_y_triplos(texto):
+    tabla, errores = analizar_dos_pasadas(texto)
+    triplos = generar_triplos(texto)
+    return tabla, errores, triplos

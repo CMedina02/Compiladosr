@@ -1,7 +1,7 @@
 # app.py
 import tkinter as tk
-from tkinter import ttk, messagebox
-from analyzer import analizar_dos_pasadas
+from tkinter import ttk, messagebox, filedialog
+from analyzer import analizar_y_triplos
 
 EJEMPLO = (
     "E$ auroraM19 , ROGER27 , cris500;\n"
@@ -36,14 +36,16 @@ class App(tk.Tk):
         self.title("Mini-Compilador Automatas II")
         self.geometry("1920x1080")
 
-        # ====== Panel izquierdo (editor con números de línea) ======
+        self._last_triplos = []  # almacena los últimos triplos generados
+
+        # ====== PANEL IZQUIERDO (Editor) ======
         left = ttk.LabelFrame(self, text="Entrada del programa")
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         editor_wrap = ttk.Frame(left)
         editor_wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        # Columna de números de línea
+        # Números de línea
         self.line_nums = tk.Text(
             editor_wrap, width=5, padx=6, takefocus=0, border=0,
             background="#f3f3f3", state="disabled", wrap="none",
@@ -51,42 +53,46 @@ class App(tk.Tk):
         )
         self.line_nums.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Editor principal
+        # Editor de texto principal
         self.txt = tk.Text(
             editor_wrap, wrap="none", undo=True, font=("Consolas", 12)
         )
         self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Scrollbar vertical compartida
+        # Scroll vertical compartido
         yscroll = ttk.Scrollbar(editor_wrap, orient="vertical")
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         yscroll.config(command=self._sync_yview)
         self.txt.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.txt))
         self.line_nums.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.line_nums))
 
-        # Scrollbar horizontal solo para el editor
+        # Scroll horizontal para el editor
         xscroll = ttk.Scrollbar(left, orient="horizontal", command=self.txt.xview)
         xscroll.pack(fill=tk.X, padx=6)
         self.txt.config(xscrollcommand=xscroll.set)
 
-        # Texto ejemplo
+        # Cargar ejemplo inicial
         self.txt.insert("1.0", EJEMPLO)
 
-        # Eventos para actualizar los números de línea
+        # Eventos para actualizar números de línea
         self.txt.bind("<KeyRelease>", self._update_line_numbers)
         self.txt.bind("<MouseWheel>", self._update_line_numbers)
         self.txt.bind("<ButtonRelease-1>", self._update_line_numbers)
         self.txt.bind("<<Modified>>", self._on_modified)
-        self.bind("<Configure>", self._update_line_numbers)  # redimensionar ventana
+        self.bind("<Configure>", self._update_line_numbers)
 
-        # ====== Panel derecho (tablas y controles) ======
+        # ====== PANEL DERECHO (Tablas y botones) ======
         right = ttk.Frame(self)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=8, pady=8)
 
-        btns = ttk.Frame(right); btns.pack(fill=tk.X)
+        # Botones principales
+        btns = ttk.Frame(right)
+        btns.pack(fill=tk.X)
         ttk.Button(btns, text="Analizar (2 pasadas)", command=self.analizar).pack(side=tk.LEFT, padx=4, pady=4)
         ttk.Button(btns, text="Limpiar", command=self.limpiar).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(btns, text="Exportar triplos (CSV)", command=self.exportar_triplos).pack(side=tk.LEFT, padx=4, pady=4)
 
+        # ===== Tabla de símbolos =====
         lf_tab = ttk.LabelFrame(right, text="Tabla de símbolos (Lexema / Tipo)")
         lf_tab.pack(fill=tk.BOTH, expand=True, pady=(8, 6))
         self.tree_sym = ttk.Treeview(lf_tab, columns=("lex", "tipo"), show="headings", height=16)
@@ -96,7 +102,8 @@ class App(tk.Tk):
         self.tree_sym.column("tipo", width=120)
         self.tree_sym.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        lf_err = ttk.LabelFrame(right, text="Tabla de errores (estandarizada)")
+        # ===== Tabla de errores =====
+        lf_err = ttk.LabelFrame(right, text="Tabla de errores (Estandarizada)")
         lf_err.pack(fill=tk.BOTH, expand=True)
         self.tree_err = ttk.Treeview(
             lf_err,
@@ -116,17 +123,20 @@ class App(tk.Tk):
         self.tree_err.column("desc", width=420)
         self.tree_err.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
+        # Créditos
         help_lbl = ttk.Label(
             right, justify="left",
             text=("Autores:\n"
                   "• Roger Fernando Gonzalez Pereira.\n"
                   "• Aurora Vanessa Madera Canul.\n"
                   "• Cristian Eduardo Medina Pech.\n")
-        ); help_lbl.pack(fill=tk.X, pady=8)
+        )
+        help_lbl.pack(fill=tk.X, pady=8)
 
-        # Inicializa la numeración al arrancar
+        # Inicializar numeración
         self._update_line_numbers()
 
+    # ===== Sincronización y numeración =====
     def _on_modified(self, event=None):
         self.txt.edit_modified(False)
         self._update_line_numbers()
@@ -149,16 +159,18 @@ class App(tk.Tk):
         self.line_nums.insert("1.0", nums)
         self.line_nums.configure(state="disabled")
 
-    # ====== lógica de análisis ======
+    # ===== Lógica de análisis =====
     def limpiar(self):
         self.tree_sym.delete(*self.tree_sym.get_children())
         self.tree_err.delete(*self.tree_err.get_children())
+        self._last_triplos = []
 
     def analizar(self):
         try:
             self.limpiar()
             texto = self.txt.get("1.0", tk.END)
-            tabla, errores = analizar_dos_pasadas(texto)
+            tabla, errores, triplos = analizar_y_triplos(texto)
+            self._last_triplos = triplos  # almacenar triplos para exportar
 
             for lex, tipo in tabla:
                 self.tree_sym.insert("", tk.END, values=(lex, tipo))
@@ -166,8 +178,35 @@ class App(tk.Tk):
             for e in errores:
                 self.tree_err.insert("", tk.END, values=(e['token'], e['linea'], e['col'], e['lex'], e['desc']))
 
+            messagebox.showinfo("Éxito", f"Análisis completo.\nTriplos generados: {len(triplos)}")
+
         except Exception as ex:
             messagebox.showerror("Error", f"Ocurrió un error durante el análisis:\n{ex}")
+
+    # ===== Exportar a CSV =====
+    def exportar_triplos(self):
+        if not self._last_triplos:
+            messagebox.showwarning("Sin datos", "Primero ejecuta 'Analizar' para generar triplos.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV","*.csv")],
+            title="Guardar triplos como CSV"
+        )
+        if not path:
+            return
+
+        try:
+            import csv
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["N", "O", "D.O", "D.F"])
+                for n, o, do, df in self._last_triplos:
+                    writer.writerow([n, o, do, df])
+            messagebox.showinfo("Triplos exportados", f"Archivo guardado en:\n{path}")
+        except Exception as ex:
+            messagebox.showerror("Error", f"No se pudo guardar el archivo:\n{ex}")
 
 if __name__ == "__main__":
     App().mainloop()
