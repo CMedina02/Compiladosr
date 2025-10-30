@@ -36,7 +36,7 @@ class App(tk.Tk):
         self.title("Mini-Compilador Automatas II")
         self.geometry("1920x1080")
 
-        self._last_triplos = []  # almacena los últimos triplos generados
+        self._last_triplos = []  # guarda triplos generados
 
         # ====== PANEL IZQUIERDO (Editor) ======
         left = ttk.LabelFrame(self, text="Entrada del programa")
@@ -53,10 +53,8 @@ class App(tk.Tk):
         )
         self.line_nums.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Editor de texto principal
-        self.txt = tk.Text(
-            editor_wrap, wrap="none", undo=True, font=("Consolas", 12)
-        )
+        # Editor de texto
+        self.txt = tk.Text(editor_wrap, wrap="none", undo=True, font=("Consolas", 12))
         self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Scroll vertical compartido
@@ -66,50 +64,54 @@ class App(tk.Tk):
         self.txt.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.txt))
         self.line_nums.config(yscrollcommand=lambda *a: self._on_yscroll(*a, widget=self.line_nums))
 
-        # Scroll horizontal para el editor
+        # Scroll horizontal para editor
         xscroll = ttk.Scrollbar(left, orient="horizontal", command=self.txt.xview)
         xscroll.pack(fill=tk.X, padx=6)
         self.txt.config(xscrollcommand=xscroll.set)
 
-        # Cargar ejemplo inicial
+        # Cargar ejemplo
         self.txt.insert("1.0", EJEMPLO)
 
-        # Eventos para actualizar números de línea
+        # Eventos de numeración
         self.txt.bind("<KeyRelease>", self._update_line_numbers)
         self.txt.bind("<MouseWheel>", self._update_line_numbers)
         self.txt.bind("<ButtonRelease-1>", self._update_line_numbers)
         self.txt.bind("<<Modified>>", self._on_modified)
         self.bind("<Configure>", self._update_line_numbers)
 
-        # ====== PANEL DERECHO (Tablas y botones) ======
+        # ====== PANEL DERECHO ======
         right = ttk.Frame(self)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=8, pady=8)
 
-        # Botones principales
+        # Botones
         btns = ttk.Frame(right)
         btns.pack(fill=tk.X)
         ttk.Button(btns, text="Analizar (2 pasadas)", command=self.analizar).pack(side=tk.LEFT, padx=4, pady=4)
         ttk.Button(btns, text="Limpiar", command=self.limpiar).pack(side=tk.LEFT, padx=4, pady=4)
         ttk.Button(btns, text="Exportar triplos (CSV)", command=self.exportar_triplos).pack(side=tk.LEFT, padx=4, pady=4)
 
-        # ===== Tabla de símbolos =====
-        lf_tab = ttk.LabelFrame(right, text="Tabla de símbolos (Lexema / Tipo)")
-        lf_tab.pack(fill=tk.BOTH, expand=True, pady=(8, 6))
-        self.tree_sym = ttk.Treeview(lf_tab, columns=("lex", "tipo"), show="headings", height=16)
+        # ====== Pestañas ======
+        notebook = ttk.Notebook(right)
+        notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 8))
+
+        # ---- Pestaña Símbolos ----
+        frame_sym = ttk.Frame(notebook)
+        notebook.add(frame_sym, text="Símbolos")
+        self.tree_sym = ttk.Treeview(frame_sym, columns=("lex", "tipo"), show="headings", height=20)
         self.tree_sym.heading("lex", text="Lexema")
         self.tree_sym.heading("tipo", text="Tipo de dato")
         self.tree_sym.column("lex", width=260)
         self.tree_sym.column("tipo", width=120)
         self.tree_sym.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        # ===== Tabla de errores =====
-        lf_err = ttk.LabelFrame(right, text="Tabla de errores (Estandarizada)")
-        lf_err.pack(fill=tk.BOTH, expand=True)
+        # ---- Pestaña Errores ----
+        frame_err = ttk.Frame(notebook)
+        notebook.add(frame_err, text="Errores")
         self.tree_err = ttk.Treeview(
-            lf_err,
+            frame_err,
             columns=("token","linea","col","lex","desc"),
             show="headings",
-            height=16
+            height=20
         )
         self.tree_err.heading("token", text="Token")
         self.tree_err.heading("linea", text="Línea")
@@ -123,6 +125,25 @@ class App(tk.Tk):
         self.tree_err.column("desc", width=420)
         self.tree_err.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
+        # ---- Pestaña Triplos ----
+        frame_tri = ttk.Frame(notebook)
+        notebook.add(frame_tri, text="Triplos")
+        self.tree_tri = ttk.Treeview(
+            frame_tri,
+            columns=("N","O","DO","DF"),
+            show="headings",
+            height=20
+        )
+        self.tree_tri.heading("N", text="N")
+        self.tree_tri.heading("O", text="O")
+        self.tree_tri.heading("DO", text="D.O")
+        self.tree_tri.heading("DF", text="D.F")
+        self.tree_tri.column("N", width=60, anchor="e")
+        self.tree_tri.column("O", width=120)
+        self.tree_tri.column("DO", width=160)
+        self.tree_tri.column("DF", width=160)
+        self.tree_tri.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
         # Créditos
         help_lbl = ttk.Label(
             right, justify="left",
@@ -133,10 +154,10 @@ class App(tk.Tk):
         )
         help_lbl.pack(fill=tk.X, pady=8)
 
-        # Inicializar numeración
+        # Numeración inicial
         self._update_line_numbers()
 
-    # ===== Sincronización y numeración =====
+    # ======= Sincronización y numeración =======
     def _on_modified(self, event=None):
         self.txt.edit_modified(False)
         self._update_line_numbers()
@@ -159,10 +180,11 @@ class App(tk.Tk):
         self.line_nums.insert("1.0", nums)
         self.line_nums.configure(state="disabled")
 
-    # ===== Lógica de análisis =====
+    # ======= Lógica de análisis =======
     def limpiar(self):
         self.tree_sym.delete(*self.tree_sym.get_children())
         self.tree_err.delete(*self.tree_err.get_children())
+        self.tree_tri.delete(*self.tree_tri.get_children())
         self._last_triplos = []
 
     def analizar(self):
@@ -170,20 +192,21 @@ class App(tk.Tk):
             self.limpiar()
             texto = self.txt.get("1.0", tk.END)
             tabla, errores, triplos = analizar_y_triplos(texto)
-            self._last_triplos = triplos  # almacenar triplos para exportar
+            self._last_triplos = triplos
 
             for lex, tipo in tabla:
                 self.tree_sym.insert("", tk.END, values=(lex, tipo))
-
             for e in errores:
-                self.tree_err.insert("", tk.END, values=(e['token'], e['linea'], e['col'], e['lex'], e['desc']))
+                self.tree_err.insert("", tk.END,
+                    values=(e['token'], e['linea'], e['col'], e['lex'], e['desc']))
+            for n, o, do, df in triplos:
+                self.tree_tri.insert("", tk.END, values=(n, o, do, df))
 
             messagebox.showinfo("Éxito", f"Análisis completo.\nTriplos generados: {len(triplos)}")
-
         except Exception as ex:
             messagebox.showerror("Error", f"Ocurrió un error durante el análisis:\n{ex}")
 
-    # ===== Exportar a CSV =====
+    # ======= Exportar a CSV =======
     def exportar_triplos(self):
         if not self._last_triplos:
             messagebox.showwarning("Sin datos", "Primero ejecuta 'Analizar' para generar triplos.")
