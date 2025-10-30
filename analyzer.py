@@ -250,7 +250,7 @@ class TriploEmitter:
             k,depth=j,1
             while k<len(toks) and depth>0:
                 if toks[k]["lex"]=="(": depth+=1
-                elif toks[k]["lex")==")": depth-=1
+                elif toks[k]["lex"]==")": depth-=1
                 k+=1
             return t, k
         tk=toks[i]; t=self.newT(); self.emit("=", t, tk["lex"]); return t, i+1
