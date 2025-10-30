@@ -33,17 +33,24 @@ def lex(texto: str):
             else:
                 col += 1
             pos += 1
+
         if typ in ("WS", "COMMENT"):
             for ch in lexeme:
                 if ch == "\n": line += 1; col = 1
                 else: col += 1
             pos = m.end(); continue
+
         if typ == "NEWLINE":
             line += 1; col = 1; pos = m.end(); continue
+
         tok = {"tipo": typ, "lex": lexeme, "linea": line, "col": col}
-        if typ == "IDENT" and lexeme in KW:
+        # Acepta do/while en cualquier combinación de mayúsculas/minúsculas
+        if typ == "IDENT" and lexeme.lower() in KW:
             tok["tipo"] = "KW"
+            tok["lex"]  = lexeme.lower()
+
         tokens.append(tok)
+
         for ch in lexeme:
             if ch == "\n": line += 1; col = 1
             else: col += 1
@@ -85,7 +92,7 @@ def analizar_primera_pasada(texto: str):
     return tabla
 
 
-# ===== 2ª pasada: Errores semánticos (básicos y no bloqueantes) =====
+# ===== 2ª pasada: Errores semánticos (básicos) =====
 def _tipo_literal(tok):
     if tok['tipo'] == 'INT':   return TOK_INT
     if tok['tipo'] == 'FLOAT': return TOK_FLOAT
@@ -160,7 +167,7 @@ def analizar_dos_pasadas(texto: str):
     return tabla, errores
 
 
-# ===== Utilidades parsing (para la fase de triplos) =====
+# ===== Utilidades parsing (fase triplos) =====
 def _strip_parens(tokens):
     if len(tokens) >= 2 and tokens[0]['lex'] == '(' and tokens[-1]['lex'] == ')':
         depth = 0; ok = True
@@ -257,6 +264,10 @@ class TriploEmitter:
 
     # ---- Relacional: emite solo la fila [REL], retorna su N ----
     def gen_rel_row(self, rel_tokens):
+        """
+        [REL] se emite como:
+           O = op_rel,  DO = temp_LHS,  DF = temp_RHS
+        """
         self.temp = 0
         depth, pos, relop = 0, -1, None
         for j, tk in enumerate(rel_tokens):
@@ -268,7 +279,7 @@ class TriploEmitter:
                 pos = j; relop = tk['lex']; break
         if relop is None:
             t, _ = self._gen_expr(rel_tokens, 0)
-            return self.emit('!=', t, '0')
+            return self.emit('!=', t, '0')  # expr ≠ 0
         left = rel_tokens[:pos]; right = rel_tokens[pos+1:]
         tL, _ = self._gen_expr(left, 0)
         tR, _ = self._gen_expr(right, 0)
@@ -277,15 +288,17 @@ class TriploEmitter:
     # ---- Condición de do-while (|| y && con cortocircuito) ----
     def gen_condition_do_while(self, cond_tokens, N_body):
         """
-        Por cada relacional emite EXACTAMENTE 3 filas consecutivas:
-          [REL], TRUE, FALSE  (TRUE/FALSE en O; destino en DO)
-        Devuelve una lista de **índices** de filas que deben apuntar a END del do actual.
+        Por cada relacional emite EXACTAMENTE 3 filas:
+          [REL]  -> O: <op>, DO: LHS,    DF: RHS
+          TRUE   -> O: "",    DO: TRUE,  DF: destino
+          FALSE  -> O: "",    DO: FALSE, DF: destino
+        Devuelve **índices** de filas cuyo DF = 'PENDING_END' para parchar al END local del do.
         """
         cond_tokens = _strip_parens(cond_tokens)
         or_terms = _split_top(cond_tokens, {'||'})
 
         pending_false_to_next_term = []  # índices: FALSE -> primer [REL] del sig. término
-        pending_to_end = []              # índices: (TRUE/FALSE) -> END del do
+        pending_to_end = []              # índices: (TRUE/FALSE) -> END local (DF = 'PENDING_END')
 
         for t_idx, term in enumerate(or_terms):
             term = _strip_parens(term)
@@ -298,18 +311,19 @@ class TriploEmitter:
             for f_idx, factor in enumerate(and_factors):
                 factor = _strip_parens(factor)
 
+                # [REL]
                 relN = self.gen_rel_row(factor)
 
-                # Primer [REL] del término: resuelve pendientes FALSE→siguiente término
+                # Primer [REL] del término: resolver FALSE pendientes de términos previos
                 if first_relN_of_term is None:
                     first_relN_of_term = relN
-                    for ridx in pending_false_to_next_term:
-                        self.rows[ridx]["DO"] = str(first_relN_of_term)
+                    for row_idx in pending_false_to_next_term:
+                        self.rows[row_idx]["DF"] = str(first_relN_of_term)
                     pending_false_to_next_term = []
 
-                # TRUE pendientes (AND) van al [REL] actual
-                for ridx in pending_true_to_next_factor:
-                    self.rows[ridx]["DO"] = str(relN)
+                # Resolver TRUE pendientes (AND) hacia este [REL]
+                for row_idx in pending_true_to_next_factor:
+                    self.rows[row_idx]["DF"] = str(relN)
                 pending_true_to_next_factor = []
 
                 last_factor = (f_idx == len(and_factors) - 1)
@@ -317,34 +331,38 @@ class TriploEmitter:
 
                 if len(and_factors) == 1:
                     # término con un solo factor
-                    self.emit("TRUE", str(N_body), "")
-                    self.emit("FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM", "")
+                    self.emit("", "TRUE",  str(N_body))  # TRUE -> BODY (D.O=TRUE, D.F=destino)
+                    self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                     idx_false = len(self.rows) - 1
                     (pending_to_end if last_term else local_false_of_term).append(idx_false)
                 else:
                     if not last_factor:
-                        self.emit("TRUE", "PENDING_NEXT_FACTOR", "")
+                        # TRUE -> siguiente factor
+                        self.emit("", "TRUE",  "PENDING_NEXT_FACTOR")
                         idx_true = len(self.rows) - 1
                         pending_true_to_next_factor.append(idx_true)
-                        self.emit("FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM", "")
+                        # FALSE -> siguiente término o END
+                        self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                         idx_false = len(self.rows) - 1
                         (pending_to_end if last_term else local_false_of_term).append(idx_false)
                     else:
-                        self.emit("TRUE", str(N_body), "")
-                        self.emit("FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM", "")
+                        # último factor del término
+                        self.emit("", "TRUE",  str(N_body))  # BODY
+                        self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                         idx_false = len(self.rows) - 1
                         (pending_to_end if last_term else local_false_of_term).append(idx_false)
 
+            # al cerrar término, sus FALSE locales apuntarán al primer [REL] del siguiente término
             pending_false_to_next_term.extend(local_false_of_term)
 
         # FALSE→siguiente término que quedó sin siguiente término ⇒ END
-        for ridx in pending_false_to_next_term:
-            self.rows[ridx]["DO"] = "PENDING_END"
+        for idx in pending_false_to_next_term:
+            self.rows[idx]["DF"] = "PENDING_END"
 
         # Seguridad: TRUE→NEXT_FACTOR sin resolver ⇒ BODY
         for r in self.rows:
-            if r["O"] == "TRUE" and r["DO"] == "PENDING_NEXT_FACTOR":
-                r["DO"] = str(N_body)
+            if r["DO"] == "TRUE" and r["DF"] == "PENDING_NEXT_FACTOR":
+                r["DF"] = str(N_body)
 
         return pending_to_end
 
@@ -401,7 +419,7 @@ def generar_triplos(texto: str):
                 # END local = primera N después de este do
                 local_end = em.N + 1
                 for ridx in pending_end_rows:
-                    em.rows[ridx]["DO"] = str(local_end)
+                    em.rows[ridx]["DF"] = str(local_end)
         return idx
 
     while i < n:
