@@ -1,17 +1,11 @@
-# analyzer.py — Unión del analizador anterior (lexer + parser + símbolos + errores)
-#               con el generador de TRIPLOS (do-while, AND/OR con cortocircuito)
-#               sin romper compatibilidad con la GUI ni con la API previa.
+# analyzer.py — Unión estable + FIX de saltos:
+#   FALSE de OR salta al PRIMER "=" del siguiente término,
+#   TRUE intermedio de AND salta al PRIMER "=" del siguiente factor.
 #
-# API expuesta (compatibles):
-#   - analizar_dos_pasadas(texto) -> (tabla_simbolos, errores)
-#   - analizar_y_triplos(texto)   -> (tabla_simbolos, errores, triplos)
-#   - tabla_tokens(texto)         -> [(#, tipo, lexema, linea, col)]
-#
-# TRIPLOS:
-#   - Formato columnas: N | O | D.O | D.F
-#   - Para saltos: O="" ; D.O = "TRUE"/"FALSE" ; D.F = destino (BODY / [REL] siguiente / END)
-#   - Cada relacional emite EXACTAMENTE 3 filas: [REL], TRUE, FALSE
-#   - do{...}while(cond) anidado respetando END local
+# API:
+#   analizar_dos_pasadas(texto) -> (tabla_simbolos, errores)
+#   analizar_y_triplos(texto)   -> (tabla_simbolos, errores, triplos)
+#   tabla_tokens(texto)         -> [(#, tipo, lexema, linea, col)]
 
 import re
 from rules import (
@@ -21,7 +15,7 @@ from rules import (
 )
 
 # =========================================================================
-#                          CLASES AST (Abstract Syntax Tree)
+#                          CLASES AST
 # =========================================================================
 
 class Node:
@@ -64,7 +58,6 @@ def lex(texto):
     """
     Devuelve lista de dicts: {'tipo','lex','linea','col'}.
     tipo ∈ { TIPO, IDENT, INT, FLOAT, STR, CHAR, KW, OP, DESCONOCIDO }
-    (Se apoya en rules.TOKEN_PATTERN y las regex RE_* del proyecto)
     """
     toks = []
     i = 0
@@ -100,18 +93,17 @@ def lex(texto):
             else:
                 tipo = 'IDENT'
         else:
-            # operadores, puntuación, etc.
             tipo = 'OP'
 
         toks.append({'tipo': tipo, 'lex': lexema, 'linea': linea, 'col': col})
 
-    # Añade un EOF lógico para el parser
+    # EOF sintético para el parser (no se muestra en GUI)
     toks.append({'tipo': 'EOF', 'lex': 'EOF', 'linea': -1, 'col': -1})
     return toks
 
 
 # =========================================================================
-#                             PARSER (descendente recursivo)
+#                             PARSER
 # =========================================================================
 
 class Parser:
@@ -146,7 +138,6 @@ class Parser:
     def report_error(self, token_type, line, lexeme, desc):
         self.errores_sintacticos.append({'token': token_type, 'linea': line, 'lex': lexeme, 'desc': desc})
 
-    # factor: literal | ident | '(' expresion ')'
     def parse_factor(self):
         token = self.peek()
         if token['tipo'] in ('INT', 'FLOAT', 'STR', 'CHAR'):
@@ -211,7 +202,6 @@ class Parser:
             return True
 
         elif token['tipo'] == 'KW':
-            # consumimos de forma segura hasta ; o bloque {...}
             while self.peek()['lex'] not in (';', '{', 'EOF'):
                 self.consume()
             if self.peek()['lex'] == '{':
@@ -256,15 +246,10 @@ def _en_algun_ambito(nombre, scopes):
 
 
 # =========================================================================
-#     A) LLENADO DE LA TABLA DE SÍMBOLOS (Primera pasada – versión proyecto)
+#     A) TABLA DE SÍMBOLOS (P1)
 # =========================================================================
 
 def construir_tabla_simbolos_y_err_p1(texto):
-    """
-    - Construye la TABLA DE SÍMBOLOS con TODOS los lexemas (sin repetidos).
-    - Tipifica IDs declarados y literales (E$/C$/F$).
-    - Detecta ErrDeclDup en redeclaración.
-    """
     toks = lex(texto)
     tabla = {}
     errores = []
@@ -290,7 +275,6 @@ def construir_tabla_simbolos_y_err_p1(texto):
             put(decl_tok, '')
             i += 1
 
-            # Forma inválida <TIPO>=...
             if i < n and toks[i]['lex'] == '=':
                 put('=', ''); i += 1
                 while i < n and toks[i]['lex'] != ';':
@@ -307,7 +291,6 @@ def construir_tabla_simbolos_y_err_p1(texto):
                     put(';',''); i += 1
                 continue
 
-            # Lista de id (, id)* [= init] ;
             while i < n and toks[i]['tipo'] == 'IDENT':
                 ident = toks[i]; i += 1
                 cur = scopes[-1]
@@ -337,7 +320,6 @@ def construir_tabla_simbolos_y_err_p1(texto):
                 put(';',''); i += 1
             continue
 
-        # fuera de declaraciones: agregar a la tabla
         lit_tk = _tipo_literal_token(t)
         if lit_tk:
             put(t['lex'], lit_tk)
@@ -350,7 +332,7 @@ def construir_tabla_simbolos_y_err_p1(texto):
 
 
 # =========================================================================
-#            B) LLENADO DE LA TABLA DE ERRORES (Segunda pasada)
+#            B) ERRORES (P2)
 # =========================================================================
 
 def recolectar_errores_semanticos(toks, tabla_simbolos):
@@ -520,13 +502,12 @@ def recolectar_errores_semanticos(toks, tabla_simbolos):
 
 
 # =========================================================================
-#            C) TABLA DE TOKENS PARA LA GUI (fase 0 “símbolos”)
+#            C) TABLA DE TOKENS (para GUI pestaña “Símbolos”)
 # =========================================================================
 
 def tabla_tokens(texto: str):
     toks = lex(texto)
-    # Quita el EOF sintético de la lista para mostrar
-    if toks and toks[-1]['tipo'] == 'EOF':
+    if toks and toks[-1]['tipo'] == 'EOF':  # ocultar EOF sintético
         toks = toks[:-1]
     out = []
     for i, t in enumerate(toks, 1):
@@ -535,7 +516,7 @@ def tabla_tokens(texto: str):
 
 
 # =========================================================================
-#            D) TRIPLOS (generación con cortocircuito real)
+#            D) TRIPLOS (con FIX de saltos entre términos/factores)
 # =========================================================================
 
 REL_OPS = {"==","!=", "<","<=",">",">="}
@@ -591,7 +572,7 @@ class TriploEmitter:
         self.temp += 1
         return f"T{self.temp}"
 
-    # ------------ Expresiones ------------
+    # ---------- Expresiones ----------
     def _gen_factor(self, toks, i):
         if i < len(toks) and toks[i]['lex'] == '-':
             i += 1
@@ -633,13 +614,17 @@ class TriploEmitter:
         tname, _ = self._gen_expr(rhs_tokens, 0)
         self.emit('=', lhs_lex, tname)
 
-    # ------------ Relacional -> solo la fila [REL] ------------
+    # ---------- FIX: Relacional devuelve (firstN, relN) ----------
     def gen_rel_row(self, rel_tokens):
         """
-        [REL] como:
-          O = op_rel,  D.O = temp_LHS,  D.F = temp_RHS
+        Genera el cálculo de temporales del factor y la fila relacional.
+        Devuelve (firstN, relN):
+          - firstN: N de la PRIMERA instrucción emitida al comenzar este factor/término
+          - relN:   N de la fila del relacional (<, >, ==, etc.)
         """
         self.temp = 0
+        firstN = self.N + 1  # primera N que se generará a partir de aquí
+
         depth, pos, relop = 0, -1, None
         for j, tk in enumerate(rel_tokens):
             if tk['lex'] == '(':
@@ -648,80 +633,93 @@ class TriploEmitter:
                 depth -= 1
             elif depth == 0 and tk['lex'] in REL_OPS:
                 pos = j; relop = tk['lex']; break
+
         if relop is None:
             t, _ = self._gen_expr(rel_tokens, 0)
-            return self.emit('!=', t, '0')  # expr != 0
+            relN = self.emit('!=', t, '0')
+            return firstN, relN
+
         left  = rel_tokens[:pos]
         right = rel_tokens[pos+1:]
         tL, _ = self._gen_expr(left, 0)
         tR, _ = self._gen_expr(right, 0)
-        return self.emit(relop, tL, tR)
+        relN = self.emit(relop, tL, tR)
+        return firstN, relN
 
-    # ------------ Condición do-while (|| y && con cortocircuito) ------------
     def gen_condition_do_while(self, cond_tokens, N_body):
         """
         Por cada relacional emite EXACTAMENTE 3 filas:
           [REL]  -> O:<op>, DO:<LHS>, DF:<RHS>
-          TRUE   -> O:"",   DO:"TRUE",  DF:<destino>
-          FALSE  -> O:"",   DO:"FALSE", DF:<destino>
-        Devuelve **índices** de filas con DF='PENDING_END' para parchar a END local.
+          "" TRUE  -> DO:TRUE,  DF:<destino>
+          "" FALSE -> DO:FALSE, DF:<destino>
+        FALSE de OR  -> primer "=" del siguiente término (no al relacional).
+        TRUE de AND  -> primer "=" del siguiente factor.
         """
         cond_tokens = _strip_parens(cond_tokens)
         or_terms = _split_top(cond_tokens, {'||'})
 
-        pending_false_to_next_term = []  # indices: FALSE -> primer [REL] del siguiente término
-        pending_to_end = []              # indices: (TRUE/FALSE) -> END local (DF='PENDING_END')
+        pending_false_to_next_term = []  # filas FALSE que irán al firstN del siguiente término
+        pending_to_end = []              # filas cuyo DF debe parcharse al END local
 
         for t_idx, term in enumerate(or_terms):
             term = _strip_parens(term)
             and_factors = _split_top(term, {'&&'})
 
-            pending_true_to_next_factor = []  # indices: TRUE -> [REL] del siguiente factor
-            first_relN_of_term = None
+            pending_true_to_next_factor = []  # filas TRUE que irán al firstN del siguiente factor
+            first_firstN_of_term = None
             local_false_of_term = []
 
             for f_idx, factor in enumerate(and_factors):
                 factor = _strip_parens(factor)
 
-                relN = self.gen_rel_row(factor)
+                # [REL] de este factor
+                firstN, relN = self.gen_rel_row(factor)
 
-                if first_relN_of_term is None:
-                    first_relN_of_term = relN
+                # Primer factor del término: resolver FALSE pendientes del término anterior
+                if first_firstN_of_term is None:
+                    first_firstN_of_term = firstN
                     for row_idx in pending_false_to_next_term:
-                        self.rows[row_idx]["DF"] = str(first_relN_of_term)
+                        self.rows[row_idx]["DF"] = str(first_firstN_of_term)
                     pending_false_to_next_term = []
 
+                # Resolver TRUE pendientes (AND) hacia el INICIO (firstN) de este factor
                 for row_idx in pending_true_to_next_factor:
-                    self.rows[row_idx]["DF"] = str(relN)
+                    self.rows[row_idx]["DF"] = str(firstN)
                 pending_true_to_next_factor = []
 
-                last_factor = (f_idx == len(and_factors)-1)
-                last_term   = (t_idx == len(or_terms)-1)
+                last_factor = (f_idx == len(and_factors) - 1)
+                last_term   = (t_idx == len(or_terms) - 1)
 
                 if len(and_factors) == 1:
-                    self.emit("", "TRUE",  str(N_body))  # TRUE -> BODY
+                    self.emit("", "TRUE",  str(N_body))  # BODY
                     self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                     idx_false = len(self.rows) - 1
                     (pending_to_end if last_term else local_false_of_term).append(idx_false)
                 else:
                     if not last_factor:
+                        # AND: TRUE -> firstN del siguiente factor
                         self.emit("", "TRUE",  "PENDING_NEXT_FACTOR")
                         idx_true = len(self.rows) - 1
                         pending_true_to_next_factor.append(idx_true)
+                        # AND: FALSE -> siguiente término o END
                         self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                         idx_false = len(self.rows) - 1
                         (pending_to_end if last_term else local_false_of_term).append(idx_false)
                     else:
-                        self.emit("", "TRUE",  str(N_body))
+                        # último factor del término
+                        self.emit("", "TRUE",  str(N_body))  # BODY
                         self.emit("", "FALSE", "PENDING_END" if last_term else "PENDING_NEXT_TERM")
                         idx_false = len(self.rows) - 1
                         (pending_to_end if last_term else local_false_of_term).append(idx_false)
 
+            # al cerrar término, sus FALSE locales → firstN del siguiente término
             pending_false_to_next_term.extend(local_false_of_term)
 
+        # FALSE sin siguiente término ⇒ END local
         for idx in pending_false_to_next_term:
             self.rows[idx]["DF"] = "PENDING_END"
 
+        # TRUE→NEXT_FACTOR sin resolver ⇒ BODY del do actual
         for r in self.rows:
             if r["DO"] == "TRUE" and r["DF"] == "PENDING_NEXT_FACTOR":
                 r["DF"] = str(N_body)
@@ -731,7 +729,6 @@ class TriploEmitter:
 
 def generar_triplos(texto: str):
     toks = lex(texto)
-    # quitar EOF sintético para caminar cómodos
     if toks and toks[-1]['tipo'] == 'EOF':
         toks = toks[:-1]
 
@@ -747,16 +744,14 @@ def generar_triplos(texto: str):
         return idx
 
     def parse_do(idx):
-        # do { ... } while (cond);
         assert toks[idx]["tipo"] == "KW" and toks[idx]["lex"] == "do"
         idx += 1
         if idx >= n or toks[idx]["lex"] != "{":
             return idx
         idx += 1
 
-        body_start_N = em.N + 1  # primera instrucción dentro del bloque
+        body_start_N = em.N + 1  # primera N del cuerpo
 
-        # cuerpo del do (asignaciones y do anidados)
         while idx < n and toks[idx]["lex"] != "}":
             if idx+1 < n and toks[idx]["tipo"] == "IDENT" and toks[idx+1]["lex"] == "=":
                 idx = parse_assignment(idx)
@@ -767,7 +762,6 @@ def generar_triplos(texto: str):
 
         if idx < n and toks[idx]["lex"] == "}": idx += 1
 
-        # while (cond);
         if idx < n and toks[idx]["tipo"] == "KW" and toks[idx]["lex"] == "while":
             idx += 1
             if idx < n and toks[idx]["lex"] == "(":
@@ -781,7 +775,7 @@ def generar_triplos(texto: str):
                 idx = j
                 if idx < n and toks[idx]["lex"] == ";": idx += 1
 
-                # END local = primera N después de este do
+                # END local del do actual
                 local_end = em.N + 1
                 for ridx in pending_end_rows:
                     em.rows[ridx]["DF"] = str(local_end)
@@ -803,14 +797,10 @@ def generar_triplos(texto: str):
 # =========================================================================
 
 def analizar_dos_pasadas(texto):
-    # 1) Léxico
     toks = lex(texto)
-    # 2) Sintaxis
     parser = Parser(toks)
     err_p_sintaxis = parser.parse()
-    # 3) Símbolos + errores P1
     _toks_aux, tabla_simbolos, _scopes, err_p1 = construir_tabla_simbolos_y_err_p1(texto)
-    # 4) Errores P2
     err_p2 = recolectar_errores_semanticos(toks, tabla_simbolos)
 
     errores = []
