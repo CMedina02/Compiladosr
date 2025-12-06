@@ -825,3 +825,92 @@ def analizar_y_triplos(texto):
     except Exception:
         triplos = []
     return tabla, errores, triplos
+# -------------------------------------------------------------------------
+#   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE (ANTES DE TODO LO DEMÁS)
+#   Regla: instrucciones que se repiten sin modificación de sus valores
+# -------------------------------------------------------------------------
+
+def optimizar_codigo_fuente(texto: str) -> str:
+    """
+    Optimización local muy simple basada en:
+      'Instrucciones que se repiten sin haber tenido modificación
+       alguna en uno de sus valores'.
+
+    Idea:
+      Si encontramos dos asignaciones del tipo:
+
+          x = expr;
+          ...
+          y = expr;
+
+      y ninguna variable de 'expr' ha sido modificada entre ambas
+      asignaciones, reescribimos la segunda como:
+
+          y = x;
+
+      De esta forma no volvemos a calcular la expresión completa,
+      solo copiamos el resultado.
+
+    NOTA:
+      - Trabajamos línea por línea.
+      - No tocamos declaraciones E$/F$/C$ ni líneas sin forma 'id = expr;'.
+      - No modificamos la estructura de control (do/while, llaves, etc.).
+    """
+    lines = texto.splitlines()
+    last_assign = {}   # nombre -> índice de línea (1-based)
+    seen_exprs = {}    # expr_key -> (line_idx, lhs, vars)
+    optimized = []
+
+    for idx, line in enumerate(lines, start=1):
+        original = line
+        stripped = line.strip()
+
+        # Saltar líneas vacías o posibles comentarios
+        if not stripped or stripped.startswith(("//", "/*", "*")):
+            optimized.append(original)
+            continue
+
+        # No optimizar declaraciones de tipo (E$, F$, C$ ...)
+        if stripped.startswith(("E$", "F$", "C$")):
+            optimized.append(original)
+            continue
+
+        # Patrón simple de asignación:   <ws> id = ... ; <ws>
+        m = re.match(r'^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+);(\s*)$', line)
+        if not m:
+            # No es una asignación "normal": dejamos la línea igual
+            optimized.append(original)
+            continue
+
+        leading_ws, lhs, rhs_str, trailing_ws = m.groups()
+
+        # Tokenizar solo el RHS para obtener una clave de expresión y sus variables
+        rhs_tokens = [t for t in lex(rhs_str + ';') if t['lex'] != ';' and t['tipo'] != 'EOF']
+        expr_key = " ".join(t['lex'] for t in rhs_tokens)
+        vars_in_expr = {t['lex'] for t in rhs_tokens if t['tipo'] == 'IDENT'}
+
+        replacement = None
+
+        # ¿Ya vimos esta expresión antes?
+        if expr_key in seen_exprs and vars_in_expr:
+            first_line, first_lhs, expr_vars = seen_exprs[expr_key]
+            # Verificar que ninguna variable usada en la expresión haya cambiado
+            ok = True
+            for v in expr_vars:
+                if last_assign.get(v, first_line) > first_line:
+                    ok = False
+                    break
+            if ok and first_lhs != lhs:
+                # Podemos reutilizar el resultado anterior
+                replacement = f"{leading_ws}{lhs} = {first_lhs};{trailing_ws}"
+
+        # Si no se pudo reutilizar, registramos esta expresión como nueva
+        if replacement is None:
+            seen_exprs[expr_key] = (idx, lhs, vars_in_expr)
+            replacement = f"{leading_ws}{lhs} = {rhs_str};{trailing_ws}"
+
+        optimized.append(replacement)
+        # Registrar la escritura del LHS
+        last_assign[lhs] = idx
+
+    return "\n".join(optimized)
