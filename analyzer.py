@@ -108,31 +108,17 @@ def lex(texto):
 #   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE (Tipos 1, 2 y 4)
 # =========================================================================
 
+import re
+from rules import RE_IDENT  # ya lo tienes importado arriba seguramente
+
 def optimizar_codigo_fuente(texto: str) -> str:
     """
     Optimización local del código fuente ANTES del análisis léxico.
 
     Implementa:
-    1) Expresiones repetidas sin cambios (CSE local):
-       - X = A + B + C;
-         Y = A + B + C;    -> Y = X;
-
-    2) Eliminación simple de código muerto (asignaciones cuyo resultado nunca se usa):
-       - Si una variable asignada nunca se lee después, se elimina la asignación.
-
-    4) Simplificaciones algebraicas:
-       - Identidades con variables/paréntesis:
-         x * 1  -> x
-         1 * x  -> x
-         x / 1  -> x
-         x + 0  -> x
-         0 + x  -> x
-         x - 0  -> x
-
-       - Constant folding en subexpresiones SOLO numéricas:
-         10 / 1     -> 10
-         5 * 2 / 1  -> 10
-         8 * 2 / 1  -> 16
+    - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
+    - Tipo 4: Simplificaciones algebraicas (con variables y constantes).
+    NO elimina variables "no usadas" globalmente para respetar los ejemplos.
     """
 
     lineas = texto.splitlines()
@@ -168,9 +154,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
         def fold_const(m):
             text = m.group(1)
             try:
-                # Evaluamos en un entorno seguro
                 val = eval(text, {"__builtins__": None}, {})
-                # Si es float entero, lo pasamos a int para que salga como 10, no 10.0
                 if isinstance(val, float) and val.is_integer():
                     val = int(val)
                 return str(val)
@@ -180,7 +164,6 @@ def optimizar_codigo_fuente(texto: str) -> str:
         e = re.sub(const_pattern, fold_const, e)
 
         # ---- 4.2 Identidades algebraicas con variables o paréntesis ----
-        # "primario": identificador o subexpresión entre paréntesis
         prim = ident_core + r'|\([^()]+\)'
 
         old = None
@@ -198,7 +181,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             e = re.sub(r'\b0\s*\+\s*(' + prim + r')\b', r'\1', e)
             # x - 0 -> x
             e = re.sub(r'\b(' + prim + r')\s*-\s*0\b', r'\1', e)
-            # Caso especial: "+ 0" al final de toda la expresión
+            # Caso especial: "+ 0" al final
             e = re.sub(r'(' + prim + r')\s*\+\s*0\s*$', r'\1', e)
             # Caso especial: "- 0" al final
             e = re.sub(r'(' + prim + r')\s*-\s*0\s*$', r'\1', e)
@@ -206,28 +189,20 @@ def optimizar_codigo_fuente(texto: str) -> str:
         return e
 
     # ---------------------------------------------
-    # PASO 1: CSE (tipo 1) + simplificación algebraica (tipo 4)
+    # CSE (tipo 1)
     # ---------------------------------------------
     versiones = {}      # nombre -> versión (entero)
     expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
 
-    stmts = []  # lista interna de statements para luego hacer DCE tipo 2
+    resultado = []
 
     def snapshot_versiones(usados):
-        # Captura la versión de cada variable usada en la expresión
         return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
 
     def normalizar_expr(expr: str) -> str:
-        """
-        Normalización para comparar expresiones (CSE).
-        - Quita espacios.
-        - Respeta paréntesis.
-        - Intenta tratar la conmutatividad básica de + y * cuando no hay paréntesis internos.
-        (Es la versión adaptada a tu lenguaje del enfoque lógico del código de tu amigo).
-        """
         expr = expr.strip()
 
-        # Quitar paréntesis envolventes
+        # Quitar paréntesis envolventes externos
         while expr.startswith('(') and expr.endswith(')'):
             depth = 0
             wrapped = True
@@ -244,7 +219,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             else:
                 break
 
-        # Si hay cadenas o '/', solo quitar espacios
+        # Si hay cadenas o '/', sólo quitamos espacios
         if '"' in expr or "'" in expr or '/' in expr:
             return re.sub(r'\s+', '', expr)
 
@@ -260,13 +235,10 @@ def optimizar_codigo_fuente(texto: str) -> str:
         for term in terms:
             sign = term[0]
             content = term[1:]
-
-            # separar factores si es producto sin paréntesis
             if '*' in content and '(' not in content and ')' not in content:
                 factors = content.split('*')
                 factors.sort()
                 content = '*'.join(factors)
-
             norm_terms.append(sign + content)
 
         norm_terms.sort()
@@ -275,99 +247,43 @@ def optimizar_codigo_fuente(texto: str) -> str:
     for linea in lineas:
         m = re_asig.match(linea)
         if not m:
-            # No es asignación simple ID = expr;
-            usados = set(re_ident.findall(linea))
-            stmts.append({
-                "kind": "other",
-                "text": linea,
-                "used": usados,
-                "active": True,
-            })
+            # No es asignación simple
+            resultado.append(linea)
             continue
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # Simplificación algebraica (incluye constant folding)
+        # Simplificación algebraica (tipo 4)
         rhs_simpl = simplificar_expr(rhs)
 
-        # Variables usadas en RHS (según tu RE_IDENT)
-        usados = set(re_ident.findall(rhs_simpl))
+        # Si quedó "lhs = lhs" → instrucción redundante, se elimina
+        if rhs_simpl.strip() == lhs:
+            # NO añadimos esta línea al resultado
+            continue
 
-        # Snapshot de versiones para CSE seguro
+        # Variables usadas en RHS
+        usados = set(re_ident.findall(rhs_simpl))
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
 
-        # Cada asignación incrementa la versión de lhs
+        # Actualizar versión de lhs
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # ¿Ya hemos visto esta misma expresión con estas versiones?
+        # CSE: ¿la misma expresión ya se calculó con mismas versiones?
         if (expr_norm, snap) in expr_cache:
             primer_lhs = expr_cache[(expr_norm, snap)]
-            if primer_lhs == lhs:
-                # Asignación redundante a la misma variable: se elimina
-                stmts.append({
-                    "kind": "assign",
-                    "lhs": lhs,
-                    "used": usados,
-                    "text": None,
-                    "active": False,
-                })
-            else:
-                # Misma expresión pero otra variable: B = A;
+            # Evitar "X = X;" de nuevo
+            if primer_lhs != lhs:
                 nueva_linea = f"{indent}{lhs} = {primer_lhs};"
-                stmts.append({
-                    "kind": "assign",
-                    "lhs": lhs,
-                    "used": {primer_lhs},
-                    "text": nueva_linea,
-                    "active": True,
-                })
+                resultado.append(nueva_linea)
+            # Si primer_lhs == lhs, es redundante, no la agregamos
         else:
-            # Primera vez que aparece esta expresión (en estas versiones)
             expr_cache[(expr_norm, snap)] = lhs
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
-            stmts.append({
-                "kind": "assign",
-                "lhs": lhs,
-                "used": usados,
-                "text": nueva_linea,
-                "active": True,
-            })
-
-    # ---------------------------------------------
-    # PASO 2: Dead Code Elimination (tipo 2)
-    # ---------------------------------------------
-    used_vars = set()
-    for stmt in reversed(stmts):
-        if not stmt["active"]:
-            continue
-
-        if stmt["kind"] == "assign":
-            lhs = stmt["lhs"]
-            if lhs in used_vars:
-                # Asignación necesaria (alimenta un uso posterior)
-                used_vars.discard(lhs)
-                used_vars.update(stmt["used"])
-            else:
-                # Nadie usa este resultado → se elimina
-                stmt["active"] = False
-        else:
-            used_vars.update(stmt["used"])
-
-    # ---------------------------------------------
-    # PASO 3: Reconstruir código optimizado
-    # ---------------------------------------------
-    resultado = []
-    for stmt in stmts:
-        if stmt["kind"] == "assign":
-            if stmt["active"] and stmt["text"] is not None:
-                resultado.append(stmt["text"])
-            else:
-                continue
-        else:
-            resultado.append(stmt["text"])
+            resultado.append(nueva_linea)
 
     return "\n".join(resultado)
+
 
 
 # =========================================================================
