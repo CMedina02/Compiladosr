@@ -105,104 +105,185 @@ def lex(texto):
 
 
 # =========================================================================
-#   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE
+#   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE (Tipos 1, 2 y 4)
 # =========================================================================
 
 def optimizar_codigo_fuente(texto: str) -> str:
     """
-    Optimización local basada en:
-      'Instrucciones que se repiten sin haber tenido modificación alguna
-       en uno de sus valores'.
+    Optimización local del código fuente ANTES de hacer análisis léxico:
 
-    Regla implementada:
+    Tipos implementados:
+    --------------------
+    1) Expresiones repetidas sin cambios en sus variables (CSE local):
+       - A = expr; ... A = expr;           -> se elimina la segunda.
+       - A = expr; ... B = expr;           -> se transforma en: B = A;
 
-    - Si detectamos que una MISMA expresión 'expr' ya se calculó antes
-      con las mismas versiones de sus variables (es decir, ninguna de las
-      variables usadas ha sido modificada):
+    2) Tipo 2: instrucciones cuyo resultado no se usa (dead code simple):
+       - Si una asignación X = expr; nunca se usa (X no se lee después),
+         se elimina, siempre que no tenga efectos secundarios (aquí no hay).
 
-        1) Primera vez:
-              A = expr;
-           Se guarda que 'expr' fue calculada en A con cierto estado de variables.
+    4) Tipo 4: simplificaciones algebraicas SENCILLAS,
+       SOLO cuando participan variables (no se hace constant folding puro):
 
-        2) Si luego encontramos:
-              A = expr;
-           con el mismo estado de variables:
-              -> Se ELIMINA la segunda (es redundante).
+       - x * 1  -> x
+       - 1 * x  -> x
+       - x / 1  -> x
+       - x + 0  -> x
+       - 0 + x  -> x
+       - x - 0  -> x
 
-        3) Si luego encontramos:
-              B = expr;
-           con el mismo estado de variables:
-              -> Se transforma en:
-                 B = A;
+       NO se colapsan expresiones de solo constantes como 85*2/1.
 
-    Esto se ejecuta ANTES de generar tokens, tabla de símbolos, errores y triplos.
+    Restricciones:
+    --------------
+    - Solo tocamos líneas de la forma:  IDENT = expr ;
+    - No tocamos declaraciones (E$, F$, C$), do/while, ni otras estructuras.
     """
 
     lineas = texto.splitlines()
 
-    # Versión de cada variable (incrementa cada vez que esa variable se asigna)
-    versiones = {}  # nombre -> entero
-
-    # Mapa de expresiones ya calculadas:
-    # clave = (expr_normalizada, snapshot_versiones) -> primer_lhs
-    expr_cache = {}
-
-    # Regex para detectar asignaciones simples:  id = expr ;
-    re_asig = re.compile(r'^\s*([A-Za-z_]\w*)\s*=\s*(.+?);?\s*$')
+    # Regex generales
+    re_asig = re.compile(r'^(\s*)([A-Za-z_]\w*)\s*=\s*(.+?);?\s*$')
     re_ident = re.compile(r'\b[A-Za-z_]\w*\b')
 
+    # ---------------------------------------------
+    # Helper: simplificación algebraica (tipo 4)
+    # ---------------------------------------------
+    def simplificar_expr(expr: str) -> str:
+        # No tocamos expresiones con strings/chars para evitar romper literales
+        if '"' in expr or "'" in expr:
+            return expr
+
+        e = expr
+        old = None
+        # Repetimos hasta que ya no cambie
+        while old != e:
+            old = e
+            # x * 1  -> x
+            e = re.sub(r'\b([A-Za-z_]\w*)\s*\*\s*1\b', r'\1', e)
+            # 1 * x  -> x
+            e = re.sub(r'\b1\s*\*\s*([A-Za-z_]\w*)\b', r'\1', e)
+            # x / 1  -> x
+            e = re.sub(r'\b([A-Za-z_]\w*)\s*/\s*1\b', r'\1', e)
+            # x + 0  -> x
+            e = re.sub(r'\b([A-Za-z_]\w*)\s*\+\s*0\b', r'\1', e)
+            # 0 + x  -> x
+            e = re.sub(r'\b0\s*\+\s*([A-Za-z_]\w*)\b', r'\1', e)
+            # x - 0  -> x
+            e = re.sub(r'\b([A-Za-z_]\w*)\s*-\s*0\b', r'\1', e)
+
+        return e
+
+    # ---------------------------------------------
+    # PASO 1: CSE (tipo 1) + simplificación algebraica (tipo 4)
+    # ---------------------------------------------
+    versiones = {}      # nombre -> versión (entero)
+    expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
+
+    # Lista interna de "statements" sobre los que luego haremos DCE
+    stmts = []  # cada elemento: dict con keys: kind, text, lhs, used, active
+
     def normalizar_expr(expr: str) -> str:
-        # Quitamos espacios para comparar expresiones de forma robusta
         return re.sub(r'\s+', '', expr)
 
-    resultado = []
-
     for linea in lineas:
-        original = linea
-        stripped = linea.strip()
-
-        m = re_asig.match(stripped)
+        m = re_asig.match(linea)
         if not m:
-            # No es una asignación simple -> la dejamos igual
-            resultado.append(original)
+            # No es asignación simple, lo guardamos tal cual
+            used_ids = set(re_ident.findall(linea))
+            stmts.append({
+                "kind": "other",
+                "text": linea,
+                "used": used_ids,
+                "active": True,
+            })
             continue
 
-        lhs = m.group(1)           # variable a la izquierda
-        rhs = m.group(2).strip()   # expresión a la derecha
+        indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # Normalizamos la expresión para que "B + C" y "B+C" se consideren iguales
-        rhs_norm = normalizar_expr(rhs)
+        # 4) Simplificación algebraica sobre el RHS
+        rhs_simpl = simplificar_expr(rhs)
 
-        # Variables usadas en la expresión de la derecha
-        usados = set(re_ident.findall(rhs))
+        # Variables usadas en RHS
+        usados = set(re_ident.findall(rhs_simpl))
 
-        # Snapshot de versiones de esas variables en este punto
-        snapshot = tuple(sorted((var, versiones.get(var, 0)) for var in usados))
+        # Snapshot de versiones (tipo 1)
+        snapshot = tuple(sorted((v, versiones.get(v, 0)) for v in usados))
+        key = (normalizar_expr(rhs_simpl), snapshot)
 
-        key = (rhs_norm, snapshot)
-
+        # Aplicar CSE (tipo 1)
         if key in expr_cache:
-            # Ya se calculó esta expresión antes con las mismas versiones
             primer_lhs = expr_cache[key]
-
             if primer_lhs == lhs:
-                # Caso 1: A = expr; ... A = expr;  => segunda es redundante
-                # => simplemente no agregamos la línea (la eliminamos)
-                continue
-            else:
-                # Caso 2: A = expr; ... B = expr;  => optimizamos a B = A;
-                nueva_linea = f"{lhs} = {primer_lhs};"
-                resultado.append(nueva_linea)
-                # Actualizamos versión de B (lhs)
+                # Caso: A = expr; ... A = expr;  -> eliminar esta (redundante)
+                stmts.append({
+                    "kind": "assign",
+                    "lhs": lhs,
+                    "used": usados,
+                    "text": None,    # no se imprimirá
+                    "active": False, # ya marcada muerta
+                })
+                # Aún así, actualizamos versión de lhs (en la vida real se ejecutaría)
                 versiones[lhs] = versiones.get(lhs, 0) + 1
                 continue
+            else:
+                # Caso: A = expr; ... B = expr; -> B = A;
+                rhs_final = primer_lhs
+                usados = {primer_lhs}
+        else:
+            # Primera vez que vemos esta expresión-snapshot
+            expr_cache[key] = lhs
+            rhs_final = rhs_simpl
 
-        # Es la PRIMERA vez que vemos esta expresión con este snapshot de versiones
-        expr_cache[key] = lhs
-        resultado.append(original)
+        # Reconstruimos la línea optimizada (manteniendo indentación)
+        nueva_linea = f"{indent}{lhs} = {rhs_final};"
 
-        # Después de ejecutar la instrucción, la versión de lhs cambia
+        stmts.append({
+            "kind": "assign",
+            "lhs": lhs,
+            "used": usados,
+            "text": nueva_linea,
+            "active": True,
+        })
+
+        # Cada asignación cambia versión de lhs
         versiones[lhs] = versiones.get(lhs, 0) + 1
+
+    # ---------------------------------------------
+    # PASO 2: Dead Code Elimination (tipo 2)
+    # ---------------------------------------------
+    used_vars = set()
+
+    # Recorrido hacia atrás
+    for stmt in reversed(stmts):
+        if not stmt["active"]:
+            continue
+
+        if stmt["kind"] == "assign":
+            lhs = stmt["lhs"]
+            if lhs in used_vars:
+                # Esta definición alimenta algún uso posterior -> se conserva
+                used_vars.discard(lhs)
+                used_vars.update(stmt["used"])
+            else:
+                # Resultado nunca se usa -> instrucción muerta
+                stmt["active"] = False
+        else:
+            # Cualquier otra línea que use variables, las marca como necesitadas
+            used_vars.update(stmt["used"])
+
+    # ---------------------------------------------
+    # PASO 3: Reconstruir código optimizado
+    # ---------------------------------------------
+    resultado = []
+    for stmt in stmts:
+        if stmt["kind"] == "assign":
+            if stmt["active"] and stmt["text"] is not None:
+                resultado.append(stmt["text"])
+            else:
+                continue
+        else:
+            resultado.append(stmt["text"])
 
     return "\n".join(resultado)
 
