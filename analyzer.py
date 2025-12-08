@@ -1,4 +1,4 @@
-# analyzer.py — Compilador educativo + optimización local de código
+# analyzer.py — Compilador educativo + optimización local
 
 import re
 from rules import (
@@ -110,21 +110,19 @@ def lex(texto):
 
 def optimizar_codigo_fuente(texto: str) -> str:
     """
-    Optimización local del código fuente ANTES de hacer análisis léxico:
+    Optimización local del código fuente ANTES del análisis léxico:
 
-    Tipos implementados:
-    --------------------
+    Tipos implementados (para TU lenguaje):
+    ---------------------------------------
     1) Expresiones repetidas sin cambios en sus variables (CSE local):
        - A = expr; ... A = expr;           -> se elimina la segunda.
        - A = expr; ... B = expr;           -> se transforma en: B = A;
 
-    2) Tipo 2: instrucciones cuyo resultado no se usa (dead code simple):
+    2) Instrucciones cuyo resultado no se usa (dead code simple):
        - Si una asignación X = expr; nunca se usa (X no se lee después),
-         se elimina, siempre que no tenga efectos secundarios (aquí no hay).
+         se elimina, siempre que no tenga efectos secundarios.
 
-    4) Tipo 4: simplificaciones algebraicas SENCILLAS,
-       SOLO cuando participan variables (no se hace constant folding puro):
-
+    4) Simplificaciones algebraicas sencillas, SOLO con variables:
        - x * 1  -> x
        - 1 * x  -> x
        - x / 1  -> x
@@ -132,47 +130,119 @@ def optimizar_codigo_fuente(texto: str) -> str:
        - 0 + x  -> x
        - x - 0  -> x
 
-       NO se colapsan expresiones de solo constantes como 85*2/1.
+       NO se simplifican expresiones de solo constantes (85 * 2 / 1).
+       NO se tocan cadenas ("...") ni caracteres ('...').
 
     Restricciones:
     --------------
-    - Solo tocamos líneas de la forma:  IDENT = expr ;
-    - No tocamos declaraciones (E$, F$, C$), do/while, ni otras estructuras.
+    - Solo se optimizan líneas del estilo: IDENT = expr;
+    - No se tocan las declaraciones de tipo (E$, F$, C$ ...).
+    - No se modifica la sintaxis de tu mini-lenguaje, solo se reescriben RHS.
     """
 
     lineas = texto.splitlines()
 
-    # Regex generales
-    re_asig = re.compile(r'^(\s*)([A-Za-z_]\w*)\s*=\s*(.+?);?\s*$')
-    re_ident = re.compile(r'\b[A-Za-z_]\w*\b')
+    # Normalizamos el patrón de identificador para incrustarlo en otros regex
+    ident_core = RE_IDENT
+    if ident_core.startswith('^'):
+        ident_core = ident_core[1:]
+    if ident_core.endswith('$'):
+        ident_core = ident_core[:-1]
+
+    # Asignaciones del tipo:   ID = expr;
+    re_asig = re.compile(r'^(\s*)(' + ident_core + r')\s*=\s*(.+?);?\s*$')
+    # Identificadores válidos según TU lenguaje
+    re_ident = re.compile(ident_core)
 
     # ---------------------------------------------
     # Helper: simplificación algebraica (tipo 4)
     # ---------------------------------------------
     def simplificar_expr(expr: str) -> str:
-        # No tocamos expresiones con strings/chars para evitar romper literales
+        # No tocamos expresiones con strings/chars
         if '"' in expr or "'" in expr:
             return expr
 
         e = expr
         old = None
-        # Repetimos hasta que ya no cambie
         while old != e:
             old = e
-            # x * 1  -> x
-            e = re.sub(r'\b([A-Za-z_]\w*)\s*\*\s*1\b', r'\1', e)
-            # 1 * x  -> x
-            e = re.sub(r'\b1\s*\*\s*([A-Za-z_]\w*)\b', r'\1', e)
-            # x / 1  -> x
-            e = re.sub(r'\b([A-Za-z_]\w*)\s*/\s*1\b', r'\1', e)
-            # x + 0  -> x
-            e = re.sub(r'\b([A-Za-z_]\w*)\s*\+\s*0\b', r'\1', e)
-            # 0 + x  -> x
-            e = re.sub(r'\b0\s*\+\s*([A-Za-z_]\w*)\b', r'\1', e)
-            # x - 0  -> x
-            e = re.sub(r'\b([A-Za-z_]\w*)\s*-\s*0\b', r'\1', e)
-
+            # x * 1 -> x
+            e = re.sub(r'\b(' + ident_core + r')\s*\*\s*1\b', r'\1', e)
+            # 1 * x -> x
+            e = re.sub(r'\b1\s*\*\s*(' + ident_core + r')\b', r'\1', e)
+            # x / 1 -> x
+            e = re.sub(r'\b(' + ident_core + r')\s*/\s*1\b', r'\1', e)
+            # x + 0 -> x
+            e = re.sub(r'\b(' + ident_core + r')\s*\+\s*0\b', r'\1', e)
+            # 0 + x -> x
+            e = re.sub(r'\b0\s*\+\s*(' + ident_core + r')\b', r'\1', e)
+            # x - 0 -> x
+            e = re.sub(r'\b(' + ident_core + r')\s*-\s*0\b', r'\1', e)
         return e
+
+    # ---------------------------------------------
+    # Helper: normalización de expresiones (tipo amigo)
+    # ---------------------------------------------
+    def normalizar_expr(expr: str) -> str:
+        """
+        Normaliza una expresión aritmética sin cambiar su significado:
+        - Elimina paréntesis externos redundantes.
+        - Si hay cadenas o '/', solo quita espacios.
+        - Si no, trata de ver conmutatividad de + y * (como tu amigo),
+          pero usando tus identificadores.
+        """
+        expr = expr.strip()
+
+        # 1. Quitar paréntesis externos envolventes: (A + B) -> A + B
+        while expr.startswith('(') and expr.endswith(')'):
+            depth = 0
+            wrapped = True
+            for i, ch in enumerate(expr[:-1]):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                if depth == 0 and i > 0:
+                    wrapped = False
+                    break
+            if wrapped:
+                expr = expr[1:-1].strip()
+            else:
+                break
+
+        # 2. Si hay cadenas o división, no hacemos reordenamiento agresivo
+        if '"' in expr or "'" in expr or '/' in expr:
+            return re.sub(r'\s+', '', expr)
+
+        # 3. Limpiamos espacios y forzamos un signo inicial
+        expr_clean = re.sub(r'\s+', '', expr)
+        if not (expr_clean.startswith('+') or expr_clean.startswith('-')):
+            expr_clean = '+' + expr_clean
+
+        # 4. Separar en términos por + y - (nivel superior)
+        terms = re.findall(r'[+-][^+-]+', expr_clean)
+        if not terms or len("".join(terms)) != len(expr_clean):
+            # Algo raro: mejor no tocar, solo quitar espacios
+            return re.sub(r'\s+', '', expr)
+
+        norm_terms = []
+        for term in terms:
+            sign = term[0]
+            content = term[1:]
+
+            # 5. Separar factores si es un producto sin paréntesis:
+            if '*' in content and '(' not in content and ')' not in content:
+                factors = content.split('*')
+                # Orden alfabético para factores (A*B == B*A)
+                factors.sort()
+                content = '*'.join(factors)
+
+            norm_terms.append(sign + content)
+
+        # 6. Ordenar términos completos para + y -
+        norm_terms.sort()
+
+        return ''.join(norm_terms)
 
     # ---------------------------------------------
     # PASO 1: CSE (tipo 1) + simplificación algebraica (tipo 4)
@@ -180,81 +250,77 @@ def optimizar_codigo_fuente(texto: str) -> str:
     versiones = {}      # nombre -> versión (entero)
     expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
 
-    # Lista interna de "statements" sobre los que luego haremos DCE
-    stmts = []  # cada elemento: dict con keys: kind, text, lhs, used, active
+    stmts = []  # lista interna de statements para luego hacer DCE tipo 2
 
-    def normalizar_expr(expr: str) -> str:
-        return re.sub(r'\s+', '', expr)
+    def snapshot_versiones(usados):
+        return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
 
     for linea in lineas:
         m = re_asig.match(linea)
         if not m:
-            # No es asignación simple, lo guardamos tal cual
-            used_ids = set(re_ident.findall(linea))
+            # No es asignación simple ID = expr;
+            usados = set(re_ident.findall(linea))
             stmts.append({
                 "kind": "other",
                 "text": linea,
-                "used": used_ids,
+                "used": usados,
                 "active": True,
             })
             continue
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # 4) Simplificación algebraica sobre el RHS
+        # 4) Simplificación algebraica
         rhs_simpl = simplificar_expr(rhs)
 
-        # Variables usadas en RHS
+        # Variables usadas en RHS (según tu RE_IDENT)
         usados = set(re_ident.findall(rhs_simpl))
 
-        # Snapshot de versiones (tipo 1)
-        snapshot = tuple(sorted((v, versiones.get(v, 0)) for v in usados))
-        key = (normalizar_expr(rhs_simpl), snapshot)
+        # Tomamos snapshot de versiones para CSE seguro
+        snap = snapshot_versiones(usados)
+        expr_norm = normalizar_expr(rhs_simpl)
 
-        # Aplicar CSE (tipo 1)
-        if key in expr_cache:
-            primer_lhs = expr_cache[key]
+        # Cada asignación cambia la versión de lhs
+        versiones[lhs] = versiones.get(lhs, 0) + 1
+
+        # Caso: ya vimos esta expresión con estas versiones
+        if (expr_norm, snap) in expr_cache:
+            primer_lhs = expr_cache[(expr_norm, snap)]
+            # Si es la misma variable → asignación redundante: se elimina
             if primer_lhs == lhs:
-                # Caso: A = expr; ... A = expr;  -> eliminar esta (redundante)
                 stmts.append({
                     "kind": "assign",
                     "lhs": lhs,
                     "used": usados,
-                    "text": None,    # no se imprimirá
-                    "active": False, # ya marcada muerta
+                    "text": None,
+                    "active": False,
                 })
-                # Aún así, actualizamos versión de lhs (en la vida real se ejecutaría)
-                versiones[lhs] = versiones.get(lhs, 0) + 1
-                continue
             else:
-                # Caso: A = expr; ... B = expr; -> B = A;
-                rhs_final = primer_lhs
-                usados = {primer_lhs}
+                # Otra variable con misma expresión → B = A;
+                nueva_linea = f"{indent}{lhs} = {primer_lhs};"
+                stmts.append({
+                    "kind": "assign",
+                    "lhs": lhs,
+                    "used": {primer_lhs},
+                    "text": nueva_linea,
+                    "active": True,
+                })
         else:
-            # Primera vez que vemos esta expresión-snapshot
-            expr_cache[key] = lhs
-            rhs_final = rhs_simpl
-
-        # Reconstruimos la línea optimizada (manteniendo indentación)
-        nueva_linea = f"{indent}{lhs} = {rhs_final};"
-
-        stmts.append({
-            "kind": "assign",
-            "lhs": lhs,
-            "used": usados,
-            "text": nueva_linea,
-            "active": True,
-        })
-
-        # Cada asignación cambia versión de lhs
-        versiones[lhs] = versiones.get(lhs, 0) + 1
+            # Primera vez que se ve esta expresión en estas versiones
+            expr_cache[(expr_norm, snap)] = lhs
+            nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            stmts.append({
+                "kind": "assign",
+                "lhs": lhs,
+                "used": usados,
+                "text": nueva_linea,
+                "active": True,
+            })
 
     # ---------------------------------------------
     # PASO 2: Dead Code Elimination (tipo 2)
     # ---------------------------------------------
     used_vars = set()
-
-    # Recorrido hacia atrás
     for stmt in reversed(stmts):
         if not stmt["active"]:
             continue
@@ -262,14 +328,14 @@ def optimizar_codigo_fuente(texto: str) -> str:
         if stmt["kind"] == "assign":
             lhs = stmt["lhs"]
             if lhs in used_vars:
-                # Esta definición alimenta algún uso posterior -> se conserva
+                # Esta asignación alimenta un uso posterior → se queda
                 used_vars.discard(lhs)
                 used_vars.update(stmt["used"])
             else:
-                # Resultado nunca se usa -> instrucción muerta
+                # Nadie usa el resultado de lhs → se elimina
                 stmt["active"] = False
         else:
-            # Cualquier otra línea que use variables, las marca como necesitadas
+            # Cualquier otra línea hace que sus variables cuenten como “usadas”
             used_vars.update(stmt["used"])
 
     # ---------------------------------------------
@@ -896,15 +962,21 @@ class TriploEmitter:
             self.emit('-', t0, tname)
             return t0, i
         if i < len(toks) and toks[i]['lex'] == '(':
-            tname, j = self._gen_expr(toks, i + 1)
-            k, depth = j, 1
-            while k < len(toks) and depth > 0:
-                if toks[k]['lex'] == '(':
+            i0 = i
+            depth = 0
+            while i < len(toks):
+                if toks[i]['lex'] == '(':
                     depth += 1
-                elif toks[k]['lex'] == ')':
+                elif toks[i]['lex'] == ')':
                     depth -= 1
-                k += 1
-            return tname, k
+                    if depth == 0:
+                        break
+                i += 1
+            # Generar expr interna sin paréntesis
+            inner_start = i0 + 1
+            inner_end = i
+            tname, _ = self._gen_expr(toks, inner_start)
+            return tname, i + 1
         tk = toks[i]
         t = self.newT()
         self.emit('=', t, tk['lex'])
@@ -1039,12 +1111,11 @@ class TriploEmitter:
 
             pending_false_to_next_term.extend(local_false_of_term)
 
-        # Los false que van al siguiente término del OR del último término => END
+        # Los false que iban al siguiente término del último término => END
         for idx in pending_false_to_next_term:
             self.rows[idx]["DF"] = "PENDING_END"
 
-        # Las TRUE que apuntaban a siguiente factor, si quedó algo pendiente,
-        # se resuelven al body (casos límite)
+        # TRUE pendientes a NEXT_FACTOR se resuelven al body (caso límite)
         for r in self.rows:
             if r["DO"] == "TRUE" and r["DF"] == "PENDING_NEXT_FACTOR":
                 r["DF"] = str(N_body)
