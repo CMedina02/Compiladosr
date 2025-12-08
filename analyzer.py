@@ -109,6 +109,13 @@ def lex(texto):
 # =========================================================================
 
 
+# ===============================================================
+#   OPTIMIZACIÓN LOCAL DEL CÓDIGO FUENTE (ANTES DEL ANÁLISIS)
+#   - Tipo 1: expresiones repetidas sin cambios en sus variables
+#   - Tipo 4: simplificaciones algebraicas SENCILLAS
+# ===============================================================
+
+
 def optimizar_codigo_fuente(texto: str) -> str:
     """
     Optimización local del código fuente ANTES del análisis léxico.
@@ -118,7 +125,8 @@ def optimizar_codigo_fuente(texto: str) -> str:
       * SOLO si la expresión usa al menos una variable (no para constantes puras).
     - Tipo 4: Simplificaciones algebraicas sencillas:
         * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
-      SIN resolver 5*2, 8*2, etc. (no se hace constant folding general).
+        * Caso especial:  C = C + B * 2;  ->  C = C + B;
+          (solo cuando el factor es una VARIABLE, no un número)
     NO elimina variables "no usadas" globalmente.
     """
 
@@ -160,6 +168,15 @@ def optimizar_codigo_fuente(texto: str) -> str:
             e = re.sub(r'\b0\s*\+\s*', '', e)
             # x - 0 -> x
             e = re.sub(r'\s*-\s*0\b', '', e)
+
+            # 🔴 REGLA ESPECÍFICA:
+            #   C = C + B * 2;  ->  C = C + B;
+            #   (solo si el factor es una VARIABLE, no un número)
+            pattern_sum_var_times2 = (
+                r'(\b' + ident_core + r'\s*\+\s*)'   # "C + "
+                r'(' + ident_core + r')\s*\*\s*2\b'  # "B * 2"
+            )
+            e = re.sub(pattern_sum_var_times2, r'\1\2', e)
 
         return e
 
@@ -219,16 +236,19 @@ def optimizar_codigo_fuente(texto: str) -> str:
         norm_terms.sort()
         return ''.join(norm_terms)
 
+    # ---------------------------------------------
+    # Recorrido línea por línea
+    # ---------------------------------------------
     for linea in lineas:
         m = re_asig.match(linea)
         if not m:
-            # No es asignación simple
+            # No es asignación simple, se deja igual
             resultado.append(linea)
             continue
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # Simplificación algebraica (tipo 4, sin evaluar 5*2)
+        # Simplificación algebraica (tipo 4, sin evaluar 5*2 ni 8*2)
         rhs_simpl = simplificar_expr(rhs)
 
         # Si quedó "lhs = lhs" → instrucción redundante, se elimina
@@ -242,7 +262,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
         # ⚠️ IMPORTANTE: si la expresión es CONSTANTE (sin variables),
-        # NO aplicamos CSE; se deja tal cual.
+        # NO aplicamos CSE; se deja tal cual (ej. H = 1;).
         if not usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
@@ -265,6 +285,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
+
 
 
 
