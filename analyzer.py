@@ -104,11 +104,6 @@ def lex(texto):
     return toks
 
 
-# =========================================================================
-#   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE (Tipos 1, 2 y 4)
-# =========================================================================
-
-
 # ===============================================================
 #   OPTIMIZACIÓN LOCAL DEL CÓDIGO FUENTE (ANTES DEL ANÁLISIS)
 #   - Tipo 1: expresiones repetidas sin cambios en sus variables
@@ -123,6 +118,8 @@ def optimizar_codigo_fuente(texto: str) -> str:
     Implementa:
     - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
       * SOLO si la expresión usa al menos una variable (no para constantes puras).
+      * Nunca elimina una asignación; sólo puede reemplazarla por otra variable
+        (Y = X; Y = H;). Si es la misma variable (R), se deja tal cual.
     - Tipo 4: Simplificaciones algebraicas sencillas:
         * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
         * Caso especial:  C = C + B * 2;  ->  C = C + B;
@@ -261,8 +258,8 @@ def optimizar_codigo_fuente(texto: str) -> str:
         # Actualizar versión de lhs SIEMPRE
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # ⚠️ IMPORTANTE: si la expresión es CONSTANTE (sin variables),
-        # NO aplicamos CSE; se deja tal cual (ej. H = 1;).
+        # ⚠️ Si la expresión es CONSTANTE (sin variables), NO aplicamos CSE;
+        # se deja tal cual (ej. H = 1;).
         if not usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
@@ -272,20 +269,23 @@ def optimizar_codigo_fuente(texto: str) -> str:
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
 
-        # CSE: ¿la misma expresión ya se calculó con mismas versiones?
-        if (expr_norm, snap) in expr_cache:
-            primer_lhs = expr_cache[(expr_norm, snap)]
+        key = (expr_norm, snap)
+        if key in expr_cache:
+            primer_lhs = expr_cache[key]
             if primer_lhs != lhs:
+                # Reutilizamos el valor ya calculado en OTRA variable
                 nueva_linea = f"{indent}{lhs} = {primer_lhs};"
-                resultado.append(nueva_linea)
-            # Si primer_lhs == lhs, es redundante, no la agregamos
+            else:
+                # Misma variable y misma expresión: NO la eliminamos,
+                # la dejamos explícita.
+                nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            resultado.append(nueva_linea)
         else:
-            expr_cache[(expr_norm, snap)] = lhs
+            expr_cache[key] = lhs
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
-
 
 
 
