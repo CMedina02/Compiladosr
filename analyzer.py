@@ -1,6 +1,7 @@
 # analyzer.py — Compilador educativo + optimización local
 
 import re
+from codegen8086 import generar_ensamblador_8086
 from rules import (
     TOKEN_PATTERN, idx_a_line_col,
     RE_TIPO, RE_IDENT, RE_FLOAT, RE_INT, RE_STR, RE_CHAR, RE_SYSPRINT,
@@ -1169,3 +1170,14 @@ def analizar_y_triplos(texto):
     except Exception:
         triplos = []
     return tabla, errores, triplos
+
+
+def analizar_y_generar_ensamblador(texto: str):
+    """
+    Envuelve todo:
+    - Usa analizar_y_triplos para obtener tabla, errores y triplos.
+    - Traduce esos triplos a ASM 8086 usando codegen8086.
+    """
+    tabla, errores, triplos = analizar_y_triplos(texto)
+    asm = generar_ensamblador_8086(triplos)
+    return tabla, errores, triplos, asm

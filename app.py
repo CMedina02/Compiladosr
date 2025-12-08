@@ -1,6 +1,9 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from analyzer import analizar_y_triplos, optimizar_codigo_fuente
+from analyzer import (
+    analizar_y_generar_ensamblador,   # NUEVO
+    optimizar_codigo_fuente
+)
 
 EJEMPLO = (
     "E$ Pedro , Juan , Luis , i , Sofia1;\n"
@@ -22,7 +25,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Mini-Compilador Automatas II")
-        self.geometry("1750x980")
+        self.geometry("1800x1000")
         self._last_triplos = []
 
         # ==========================================================
@@ -41,7 +44,6 @@ class App(tk.Tk):
         )
         self.line_nums.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Este Text mostrará el código OPTIMIZADO después de analizar
         self.txt = tk.Text(editor_wrap, wrap="none", undo=True, font=("Consolas", 12))
         self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -56,10 +58,8 @@ class App(tk.Tk):
         xscroll.pack(fill=tk.X, padx=6)
         self.txt.config(xscrollcommand=xscroll.set)
 
-        # Al inicio, colocamos el EJEMPLO como "código original" inicial
         self.txt.insert("1.0", EJEMPLO)
 
-        # Eventos para la numeración
         self.txt.bind("<KeyRelease>", self._update_line_numbers)
         self.txt.bind("<MouseWheel>", self._update_line_numbers)
         self.txt.bind("<ButtonRelease-1>", self._update_line_numbers)
@@ -86,7 +86,6 @@ class App(tk.Tk):
         frame_orig = ttk.Frame(self.notebook)
         self.notebook.add(frame_orig, text="Código de entrada (original)")
 
-        # Aquí se mostrará SIEMPRE el código tal como lo escribió el usuario
         self.txt_orig = tk.Text(frame_orig, wrap="none", font=("Consolas", 12), state="disabled")
         self.txt_orig.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
@@ -133,6 +132,22 @@ class App(tk.Tk):
             self.tree_tri.column(h, width=w)
         self.tree_tri.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
+        # ==========================================================
+        # ========== NUEVA PESTAÑA: ASM 8086 =======================
+        # ==========================================================
+        frame_asm = ttk.Frame(self.notebook)
+        self.notebook.add(frame_asm, text="ASM 8086 (Código Objeto)")
+
+        self.asm_output = tk.Text(
+            frame_asm, wrap="none", font=("Consolas", 12)
+        )
+        
+        self.asm_output.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        asm_scroll = ttk.Scrollbar(frame_asm, orient="vertical", command=self.asm_output.yview)
+        asm_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.asm_output.config(yscrollcommand=asm_scroll.set)
+
         self._update_line_numbers()
 
     # ==========================================================
@@ -167,37 +182,35 @@ class App(tk.Tk):
         for t in (self.tree_sym, self.tree_err, self.tree_tri):
             t.delete(*t.get_children())
         self._last_triplos = []
+        self.asm_output.delete("1.0", tk.END)
 
     def analizar(self):
         try:
             self.limpiar()
 
-            # 1) LEER lo que está actualmente en el editor (lo consideramos "entrada")
             codigo_entrada = self.txt.get("1.0", tk.END)
 
-            # 2) Guardar ese CÓDIGO DE ENTRADA en la pestaña "Código de entrada (original)"
+            # Código original (pestaña)
             self.txt_orig.config(state="normal")
             self.txt_orig.delete("1.0", tk.END)
             self.txt_orig.insert("1.0", codigo_entrada)
             self.txt_orig.config(state="disabled")
 
-            # 3) OPTIMIZAR
+            # Optimizar
             codigo_opt = optimizar_codigo_fuente(codigo_entrada)
 
-            # 4) Mostrar el CÓDIGO OPTIMIZADO en el EDITOR IZQUIERDO
+            # Mostrar optimizado
             self.txt.delete("1.0", tk.END)
             self.txt.insert("1.0", codigo_opt)
             self._update_line_numbers()
 
-            # 5) Analizar SIEMPRE el código optimizado
-            tabla, errores, triplos = analizar_y_triplos(codigo_opt)
+            # Análisis completo + TRIPLOS + ASM
+            tabla, errores, triplos, asm = analizar_y_generar_ensamblador(codigo_opt)
             self._last_triplos = triplos
 
-            # Poblar símbolos
             for lex, tipo in tabla:
                 self.tree_sym.insert("", tk.END, values=(lex, tipo))
 
-            # Poblar errores
             for e in errores:
                 self.tree_err.insert(
                     "", tk.END,
@@ -205,19 +218,17 @@ class App(tk.Tk):
                             e.get("col",""), e.get("lex",""), e.get("desc",""))
                 )
 
-            # Poblar triplos
             for n, o, do, df in triplos:
                 self.tree_tri.insert("", tk.END, values=(n, o, do, df))
 
-            # Ir a pestaña de Triplos, por comodidad
-            self.notebook.select(3)
+            # === Mostrar ASM generado ===
+            self.asm_output.delete("1.0", tk.END)
+            self.asm_output.insert("1.0", asm)
 
-            messagebox.showinfo(
-                "Optimizado",
-                "Código optimizado generado con éxito.\n"
-                "A la izquierda ves el CÓDIGO OPTIMIZADO.\n"
-                "En la pestaña 'Código de entrada (original)' ves lo que escribiste."
-            )
+            # Saltar a pestaña ASM
+            self.notebook.select(4)
+
+            messagebox.showinfo("Éxito", "Compilación completa.\nSe generó ASM 8086.")
 
         except Exception as ex:
             messagebox.showerror("Error", f"Ocurrió un error:\n{ex}")
