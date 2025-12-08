@@ -111,14 +111,19 @@ def lex(texto):
 import re
 from rules import RE_IDENT  # ya lo tienes importado arriba seguramente
 
+import re
+from rules import RE_IDENT  # asegúrate de tenerlo ya importado arriba
+
 def optimizar_codigo_fuente(texto: str) -> str:
     """
     Optimización local del código fuente ANTES del análisis léxico.
 
     Implementa:
     - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
-    - Tipo 4: Simplificaciones algebraicas (con variables y constantes).
-    NO elimina variables "no usadas" globalmente para respetar los ejemplos.
+    - Tipo 4: Simplificaciones algebraicas sencillas:
+        * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
+      SIN resolver 5*2, 8*2, etc. (no se hace constant folding general).
+    NO elimina variables "no usadas" globalmente.
     """
 
     lineas = texto.splitlines()
@@ -136,7 +141,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
     re_ident = re.compile(ident_core)
 
     # ---------------------------------------------
-    # Helper: constant folding + identidades (tipo 4)
+    # Helper: simplificación algebraica (sin eval)
     # ---------------------------------------------
     def simplificar_expr(expr: str) -> str:
         # No tocamos expresiones con strings/chars
@@ -144,47 +149,21 @@ def optimizar_codigo_fuente(texto: str) -> str:
             return expr
 
         e = expr
-
-        # ---- 4.1 Constant folding: solo números + - * /, sin variables ----
-        const_pattern = r'(?<![A-Za-z0-9_$])(' \
-                        r'[0-9]+(?:\.[0-9]+)?' \
-                        r'(?:\s*[\+\-\*\/]\s*[0-9]+(?:\.[0-9]+)?)+' \
-                        r')(?![A-Za-z0-9_$])'
-
-        def fold_const(m):
-            text = m.group(1)
-            try:
-                val = eval(text, {"__builtins__": None}, {})
-                if isinstance(val, float) and val.is_integer():
-                    val = int(val)
-                return str(val)
-            except Exception:
-                return text
-
-        e = re.sub(const_pattern, fold_const, e)
-
-        # ---- 4.2 Identidades algebraicas con variables o paréntesis ----
-        prim = ident_core + r'|\([^()]+\)'
-
         old = None
         while old != e:
             old = e
+            # quitar "/ 1" después de cualquier cosa (5*2/1 -> 5*2, 10/1 -> 10)
+            e = re.sub(r'/\s*1\b', '', e)
             # x * 1 -> x
-            e = re.sub(r'\b(' + prim + r')\s*\*\s*1\b', r'\1', e)
+            e = re.sub(r'\*\s*1\b', '', e)
             # 1 * x -> x
-            e = re.sub(r'\b1\s*\*\s*(' + prim + r')\b', r'\1', e)
-            # x / 1 -> x
-            e = re.sub(r'\b(' + prim + r')\s*/\s*1\b', r'\1', e)
+            e = re.sub(r'\b1\s*\*\s*', '', e)
             # x + 0 -> x
-            e = re.sub(r'\b(' + prim + r')\s*\+\s*0\b', r'\1', e)
+            e = re.sub(r'\s*\+\s*0\b', '', e)
             # 0 + x -> x
-            e = re.sub(r'\b0\s*\+\s*(' + prim + r')\b', r'\1', e)
+            e = re.sub(r'\b0\s*\+\s*', '', e)
             # x - 0 -> x
-            e = re.sub(r'\b(' + prim + r')\s*-\s*0\b', r'\1', e)
-            # Caso especial: "+ 0" al final
-            e = re.sub(r'(' + prim + r')\s*\+\s*0\s*$', r'\1', e)
-            # Caso especial: "- 0" al final
-            e = re.sub(r'(' + prim + r')\s*-\s*0\s*$', r'\1', e)
+            e = re.sub(r'\s*-\s*0\b', '', e)
 
         return e
 
@@ -219,7 +198,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             else:
                 break
 
-        # Si hay cadenas o '/', sólo quitamos espacios
+        # Si hay cadenas o '/', sólo quitamos espacios (no normalizamos más)
         if '"' in expr or "'" in expr or '/' in expr:
             return re.sub(r'\s+', '', expr)
 
@@ -253,12 +232,11 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # Simplificación algebraica (tipo 4)
+        # Simplificación algebraica (tipo 4, sin evaluar 5*2)
         rhs_simpl = simplificar_expr(rhs)
 
         # Si quedó "lhs = lhs" → instrucción redundante, se elimina
         if rhs_simpl.strip() == lhs:
-            # NO añadimos esta línea al resultado
             continue
 
         # Variables usadas en RHS
@@ -272,7 +250,6 @@ def optimizar_codigo_fuente(texto: str) -> str:
         # CSE: ¿la misma expresión ya se calculó con mismas versiones?
         if (expr_norm, snap) in expr_cache:
             primer_lhs = expr_cache[(expr_norm, snap)]
-            # Evitar "X = X;" de nuevo
             if primer_lhs != lhs:
                 nueva_linea = f"{indent}{lhs} = {primer_lhs};"
                 resultado.append(nueva_linea)
@@ -283,7 +260,6 @@ def optimizar_codigo_fuente(texto: str) -> str:
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
-
 
 
 # =========================================================================
