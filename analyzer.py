@@ -118,8 +118,10 @@ def optimizar_codigo_fuente(texto: str) -> str:
     Implementa:
     - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
       * SOLO si la expresión usa al menos una variable (no para constantes puras).
+      * SOLO si la variable del lado izquierdo **no aparece** en la expresión,
+        para no tocar contadores de ciclo tipo R = R + 1.
       * Nunca elimina una asignación; sólo puede reemplazarla por otra variable
-        (Y = X; Y = H;). Si es la misma variable (R), se deja tal cual.
+        (Y = X; Y = H;).
     - Tipo 4: Simplificaciones algebraicas sencillas:
         * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
         * Caso especial:  C = C + B * 2;  ->  C = C + B;
@@ -248,24 +250,27 @@ def optimizar_codigo_fuente(texto: str) -> str:
         # Simplificación algebraica (tipo 4, sin evaluar 5*2 ni 8*2)
         rhs_simpl = simplificar_expr(rhs)
 
-        # Si quedó "lhs = lhs" → instrucción redundante, se elimina
-        if rhs_simpl.strip() == lhs:
-            continue
-
         # Variables usadas en RHS
         usados = set(re_ident.findall(rhs_simpl))
 
         # Actualizar versión de lhs SIEMPRE
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # ⚠️ Si la expresión es CONSTANTE (sin variables), NO aplicamos CSE;
+        # Si la expresión es CONSTANTE (sin variables), NO aplicamos CSE;
         # se deja tal cual (ej. H = 1;).
         if not usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
             continue
 
-        # Para expresiones con variables, sí aplicamos CSE
+        # Si el LHS aparece en la RHS (R = R + 1;), NO aplicamos CSE
+        # para no tocar contadores de ciclos. Solo simplificamos y dejamos.
+        if lhs in usados:
+            nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            resultado.append(nueva_linea)
+            continue
+
+        # Para expresiones con variables (y sin el lhs), sí aplicamos CSE
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
 
@@ -276,8 +281,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
                 # Reutilizamos el valor ya calculado en OTRA variable
                 nueva_linea = f"{indent}{lhs} = {primer_lhs};"
             else:
-                # Misma variable y misma expresión: NO la eliminamos,
-                # la dejamos explícita.
+                # Misma variable y misma expresión: la dejamos explícita
                 nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
         else:
@@ -286,6 +290,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
+
 
 
 
