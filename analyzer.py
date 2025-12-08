@@ -111,7 +111,6 @@ def lex(texto):
 #   - Tipo 4: simplificaciones algebraicas SENCILLAS
 # ===============================================================
 
-
 def optimizar_codigo_fuente(texto: str) -> str:
     """
     Optimización local del código fuente ANTES del análisis léxico.
@@ -120,14 +119,18 @@ def optimizar_codigo_fuente(texto: str) -> str:
     - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
       * SOLO si la expresión usa al menos una variable (no para constantes puras).
       * SOLO si la variable del lado izquierdo **no aparece** en la expresión,
-        para no tocar contadores de ciclo tipo R = R + 1.
-      * Nunca elimina una asignación; sólo puede reemplazarla por otra variable
-        (Y = X; Y = H;).
+        para no tocar contadores tipo R = R + 1.
+      * Las repeticiones se reemplazan por:
+            Xi = Xcanonical;  // OPTIMIZACIÓN: ...
     - Tipo 4: Simplificaciones algebraicas sencillas:
         * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
-        * Caso especial:  C = C + B * 2;  ->  C = C + B;
-          (solo cuando el factor es una VARIABLE, no un número)
-    NO elimina variables "no usadas" globalmente.
+        * Regla específica:  C = C + B * 2;  ->  C = C + B;
+          (solo si el factor es una VARIABLE, no un número)
+
+    Además:
+    - Se hace **propagación de copias**: si T2 es alias de T1,
+      en expresiones siguientes se usa T1 en lugar de T2.
+    - Al reasignar una variable (Opción A), se rompe su alias.
     """
 
     lineas = texto.splitlines()
@@ -141,7 +144,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
     # Asignaciones del tipo:   ID = expr;
     re_asig = re.compile(r'^(\s*)(' + ident_core + r')\s*=\s*(.+?);?\s*$')
-    # Identificadores válidos según TU lenguaje
+    # Identificadores válidos según tu lenguaje
     re_ident = re.compile(ident_core)
 
     # ---------------------------------------------
@@ -181,16 +184,41 @@ def optimizar_codigo_fuente(texto: str) -> str:
         return e
 
     # ---------------------------------------------
-    # CSE (tipo 1)
+    # Helper: aplicar alias en una expresión
     # ---------------------------------------------
-    versiones = {}      # nombre -> versión (entero)
-    expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
+    def aplicar_alias_en_expr(expr: str, alias_map: dict) -> str:
+        """
+        Sustituye variables alias por su raíz, respetando strings.
+        Ej: si alias_map = {'T2':'T1'}, entonces:
+            X = T2 + C; -> X = T1 + C;
+        """
+        if not alias_map:
+            return expr
 
-    resultado = []
+        # dividir por strings para no tocarlas
+        partes = re.split(r'(".*?"|\'.*?\')', expr)
+        nuevas = []
 
-    def snapshot_versiones(usados):
-        return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
+        for parte in partes:
+            if parte.startswith('"') or parte.startswith("'"):
+                nuevas.append(parte)
+                continue
 
+            def repl(m):
+                v = m.group(0)
+                # seguir la cadena de alias hasta la raíz
+                root = v
+                while root in alias_map:
+                    root = alias_map[root]
+                return root
+
+            nuevas.append(re_ident.sub(repl, parte))
+
+        return "".join(nuevas)
+
+    # ---------------------------------------------
+    # Helper: normalizar expresión para CSE
+    # ---------------------------------------------
     def normalizar_expr(expr: str) -> str:
         expr = expr.strip()
 
@@ -211,7 +239,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             else:
                 break
 
-        # Si hay cadenas o '/', sólo quitamos espacios (no normalizamos más)
+        # Si hay cadenas o '/', solo quitamos espacios
         if '"' in expr or "'" in expr or '/' in expr:
             return re.sub(r'\s+', '', expr)
 
@@ -237,63 +265,84 @@ def optimizar_codigo_fuente(texto: str) -> str:
         return ''.join(norm_terms)
 
     # ---------------------------------------------
+    # Estado de la optimización
+    # ---------------------------------------------
+    versiones = {}   # nombre -> versión (entero)
+    expr_cache = {}  # (expr_normalizada, snapshot_versiones) -> (lhs_canonico, expr_simpl)
+    alias_map = {}   # var -> raíz (primera variable que calculó la expresión)
+
+    def snapshot_versiones(usados):
+        return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
+
+    resultado = []
+
+    # ---------------------------------------------
     # Recorrido línea por línea
     # ---------------------------------------------
     for linea in lineas:
         m = re_asig.match(linea)
         if not m:
-            # No es asignación simple, se deja igual
-            resultado.append(linea)
+            # No es asignación simple; solo propagamos alias en el texto
+            nueva = aplicar_alias_en_expr(linea, alias_map)
+            resultado.append(nueva)
             continue
 
-        indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
+        indent, lhs, rhs_raw = m.group(1), m.group(2), m.group(3).strip()
 
-        # Simplificación algebraica (tipo 4, sin evaluar 5*2 ni 8*2)
-        rhs_simpl = simplificar_expr(rhs)
+        # Al reasignar lhs, rompemos cualquier alias previo (Opción A)
+        if lhs in alias_map:
+            del alias_map[lhs]
 
-        # Variables usadas en RHS
+        # 1) Aplicar alias a la RHS actual
+        rhs_con_alias = aplicar_alias_en_expr(rhs_raw, alias_map)
+
+        # 2) Simplificación algebraica (tipo 4)
+        rhs_simpl = simplificar_expr(rhs_con_alias)
+
+        # 3) Variables usadas en RHS
         usados = set(re_ident.findall(rhs_simpl))
 
-        # Actualizar versión de lhs SIEMPRE
+        # 4) Actualizar versión de lhs SIEMPRE (nuevo valor)
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # Si la expresión es CONSTANTE (sin variables), NO aplicamos CSE;
-        # se deja tal cual (ej. H = 1;).
+        # 5) Si la expresión NO usa variables → no aplicar CSE (ej: H = 1;)
         if not usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
             continue
 
-        # Si el LHS aparece en la RHS (R = R + 1;), NO aplicamos CSE
-        # para no tocar contadores de ciclos. Solo simplificamos y dejamos.
+        # 6) Si el LHS aparece en la RHS (R = R + 1) → no CSE, solo simplificar
         if lhs in usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
             continue
 
-        # Para expresiones con variables (y sin el lhs), sí aplicamos CSE
+        # 7) CSE para expresiones con variables y sin LHS dentro
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
-
         key = (expr_norm, snap)
+
         if key in expr_cache:
-            primer_lhs = expr_cache[key]
-            if primer_lhs != lhs:
-                # Reutilizamos el valor ya calculado en OTRA variable
-                nueva_linea = f"{indent}{lhs} = {primer_lhs};"
-            else:
-                # Misma variable y misma expresión: la dejamos explícita
-                nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            # Ya hubo una variable que calculó esta misma expresión
+            lhs_canonico, expr_original = expr_cache[key]
+
+            # Creamos un alias: lhs = lhs_canonico; con comentario
+            nueva_linea = (
+                f"{indent}{lhs} = {lhs_canonico};  "
+                f"// OPTIMIZACIÓN: línea eliminada porque repite expresión ({lhs} = {rhs_simpl})"
+            )
             resultado.append(nueva_linea)
+
+            # Registrar alias (lhs es ahora sinónimo de lhs_canonico)
+            alias_map[lhs] = lhs_canonico
+
         else:
-            expr_cache[key] = lhs
+            # Primera vez que aparece esta expresión con esas versiones:
+            expr_cache[key] = (lhs, rhs_simpl)
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
-
-
-
 
 # =========================================================================
 #                             PARSER
