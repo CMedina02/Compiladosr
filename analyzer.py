@@ -110,34 +110,29 @@ def lex(texto):
 
 def optimizar_codigo_fuente(texto: str) -> str:
     """
-    Optimización local del código fuente ANTES del análisis léxico:
+    Optimización local del código fuente ANTES del análisis léxico.
 
-    Tipos implementados (para TU lenguaje):
-    ---------------------------------------
-    1) Expresiones repetidas sin cambios en sus variables (CSE local):
-       - A = expr; ... A = expr;           -> se elimina la segunda.
-       - A = expr; ... B = expr;           -> se transforma en: B = A;
+    Implementa:
+    1) Expresiones repetidas sin cambios (CSE local):
+       - X = A + B + C;
+         Y = A + B + C;    -> Y = X;
 
-    2) Instrucciones cuyo resultado no se usa (dead code simple):
-       - Si una asignación X = expr; nunca se usa (X no se lee después),
-         se elimina, siempre que no tenga efectos secundarios.
+    2) Eliminación simple de código muerto (asignaciones cuyo resultado nunca se usa):
+       - Si una variable asignada nunca se lee después, se elimina la asignación.
 
-    4) Simplificaciones algebraicas sencillas, SOLO con variables:
-       - x * 1  -> x
-       - 1 * x  -> x
-       - x / 1  -> x
-       - x + 0  -> x
-       - 0 + x  -> x
-       - x - 0  -> x
+    4) Simplificaciones algebraicas:
+       - Identidades con variables/paréntesis:
+         x * 1  -> x
+         1 * x  -> x
+         x / 1  -> x
+         x + 0  -> x
+         0 + x  -> x
+         x - 0  -> x
 
-       NO se simplifican expresiones de solo constantes (85 * 2 / 1).
-       NO se tocan cadenas ("...") ni caracteres ('...').
-
-    Restricciones:
-    --------------
-    - Solo se optimizan líneas del estilo: IDENT = expr;
-    - No se tocan las declaraciones de tipo (E$, F$, C$ ...).
-    - No se modifica la sintaxis de tu mini-lenguaje, solo se reescriben RHS.
+       - Constant folding en subexpresiones SOLO numéricas:
+         10 / 1     -> 10
+         5 * 2 / 1  -> 10
+         8 * 2 / 1  -> 16
     """
 
     lineas = texto.splitlines()
@@ -155,7 +150,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
     re_ident = re.compile(ident_core)
 
     # ---------------------------------------------
-    # Helper: simplificación algebraica (tipo 4)
+    # Helper: constant folding + identidades (tipo 4)
     # ---------------------------------------------
     def simplificar_expr(expr: str) -> str:
         # No tocamos expresiones con strings/chars
@@ -163,37 +158,76 @@ def optimizar_codigo_fuente(texto: str) -> str:
             return expr
 
         e = expr
+
+        # ---- 4.1 Constant folding: solo números + - * /, sin variables ----
+        const_pattern = r'(?<![A-Za-z0-9_$])(' \
+                        r'[0-9]+(?:\.[0-9]+)?' \
+                        r'(?:\s*[\+\-\*\/]\s*[0-9]+(?:\.[0-9]+)?)+' \
+                        r')(?![A-Za-z0-9_$])'
+
+        def fold_const(m):
+            text = m.group(1)
+            try:
+                # Evaluamos en un entorno seguro
+                val = eval(text, {"__builtins__": None}, {})
+                # Si es float entero, lo pasamos a int para que salga como 10, no 10.0
+                if isinstance(val, float) and val.is_integer():
+                    val = int(val)
+                return str(val)
+            except Exception:
+                return text
+
+        e = re.sub(const_pattern, fold_const, e)
+
+        # ---- 4.2 Identidades algebraicas con variables o paréntesis ----
+        # "primario": identificador o subexpresión entre paréntesis
+        prim = ident_core + r'|\([^()]+\)'
+
         old = None
         while old != e:
             old = e
             # x * 1 -> x
-            e = re.sub(r'\b(' + ident_core + r')\s*\*\s*1\b', r'\1', e)
+            e = re.sub(r'\b(' + prim + r')\s*\*\s*1\b', r'\1', e)
             # 1 * x -> x
-            e = re.sub(r'\b1\s*\*\s*(' + ident_core + r')\b', r'\1', e)
+            e = re.sub(r'\b1\s*\*\s*(' + prim + r')\b', r'\1', e)
             # x / 1 -> x
-            e = re.sub(r'\b(' + ident_core + r')\s*/\s*1\b', r'\1', e)
+            e = re.sub(r'\b(' + prim + r')\s*/\s*1\b', r'\1', e)
             # x + 0 -> x
-            e = re.sub(r'\b(' + ident_core + r')\s*\+\s*0\b', r'\1', e)
+            e = re.sub(r'\b(' + prim + r')\s*\+\s*0\b', r'\1', e)
             # 0 + x -> x
-            e = re.sub(r'\b0\s*\+\s*(' + ident_core + r')\b', r'\1', e)
+            e = re.sub(r'\b0\s*\+\s*(' + prim + r')\b', r'\1', e)
             # x - 0 -> x
-            e = re.sub(r'\b(' + ident_core + r')\s*-\s*0\b', r'\1', e)
+            e = re.sub(r'\b(' + prim + r')\s*-\s*0\b', r'\1', e)
+            # Caso especial: "+ 0" al final de toda la expresión
+            e = re.sub(r'(' + prim + r')\s*\+\s*0\s*$', r'\1', e)
+            # Caso especial: "- 0" al final
+            e = re.sub(r'(' + prim + r')\s*-\s*0\s*$', r'\1', e)
+
         return e
 
     # ---------------------------------------------
-    # Helper: normalización de expresiones (tipo amigo)
+    # PASO 1: CSE (tipo 1) + simplificación algebraica (tipo 4)
     # ---------------------------------------------
+    versiones = {}      # nombre -> versión (entero)
+    expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
+
+    stmts = []  # lista interna de statements para luego hacer DCE tipo 2
+
+    def snapshot_versiones(usados):
+        # Captura la versión de cada variable usada en la expresión
+        return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
+
     def normalizar_expr(expr: str) -> str:
         """
-        Normaliza una expresión aritmética sin cambiar su significado:
-        - Elimina paréntesis externos redundantes.
-        - Si hay cadenas o '/', solo quita espacios.
-        - Si no, trata de ver conmutatividad de + y * (como tu amigo),
-          pero usando tus identificadores.
+        Normalización para comparar expresiones (CSE).
+        - Quita espacios.
+        - Respeta paréntesis.
+        - Intenta tratar la conmutatividad básica de + y * cuando no hay paréntesis internos.
+        (Es la versión adaptada a tu lenguaje del enfoque lógico del código de tu amigo).
         """
         expr = expr.strip()
 
-        # 1. Quitar paréntesis externos envolventes: (A + B) -> A + B
+        # Quitar paréntesis envolventes
         while expr.startswith('(') and expr.endswith(')'):
             depth = 0
             wrapped = True
@@ -210,19 +244,16 @@ def optimizar_codigo_fuente(texto: str) -> str:
             else:
                 break
 
-        # 2. Si hay cadenas o división, no hacemos reordenamiento agresivo
+        # Si hay cadenas o '/', solo quitar espacios
         if '"' in expr or "'" in expr or '/' in expr:
             return re.sub(r'\s+', '', expr)
 
-        # 3. Limpiamos espacios y forzamos un signo inicial
         expr_clean = re.sub(r'\s+', '', expr)
         if not (expr_clean.startswith('+') or expr_clean.startswith('-')):
             expr_clean = '+' + expr_clean
 
-        # 4. Separar en términos por + y - (nivel superior)
         terms = re.findall(r'[+-][^+-]+', expr_clean)
         if not terms or len("".join(terms)) != len(expr_clean):
-            # Algo raro: mejor no tocar, solo quitar espacios
             return re.sub(r'\s+', '', expr)
 
         norm_terms = []
@@ -230,30 +261,16 @@ def optimizar_codigo_fuente(texto: str) -> str:
             sign = term[0]
             content = term[1:]
 
-            # 5. Separar factores si es un producto sin paréntesis:
+            # separar factores si es producto sin paréntesis
             if '*' in content and '(' not in content and ')' not in content:
                 factors = content.split('*')
-                # Orden alfabético para factores (A*B == B*A)
                 factors.sort()
                 content = '*'.join(factors)
 
             norm_terms.append(sign + content)
 
-        # 6. Ordenar términos completos para + y -
         norm_terms.sort()
-
         return ''.join(norm_terms)
-
-    # ---------------------------------------------
-    # PASO 1: CSE (tipo 1) + simplificación algebraica (tipo 4)
-    # ---------------------------------------------
-    versiones = {}      # nombre -> versión (entero)
-    expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
-
-    stmts = []  # lista interna de statements para luego hacer DCE tipo 2
-
-    def snapshot_versiones(usados):
-        return tuple(sorted((v, versiones.get(v, 0)) for v in usados))
 
     for linea in lineas:
         m = re_asig.match(linea)
@@ -270,24 +287,24 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # 4) Simplificación algebraica
+        # Simplificación algebraica (incluye constant folding)
         rhs_simpl = simplificar_expr(rhs)
 
         # Variables usadas en RHS (según tu RE_IDENT)
         usados = set(re_ident.findall(rhs_simpl))
 
-        # Tomamos snapshot de versiones para CSE seguro
+        # Snapshot de versiones para CSE seguro
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
 
-        # Cada asignación cambia la versión de lhs
+        # Cada asignación incrementa la versión de lhs
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # Caso: ya vimos esta expresión con estas versiones
+        # ¿Ya hemos visto esta misma expresión con estas versiones?
         if (expr_norm, snap) in expr_cache:
             primer_lhs = expr_cache[(expr_norm, snap)]
-            # Si es la misma variable → asignación redundante: se elimina
             if primer_lhs == lhs:
+                # Asignación redundante a la misma variable: se elimina
                 stmts.append({
                     "kind": "assign",
                     "lhs": lhs,
@@ -296,7 +313,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
                     "active": False,
                 })
             else:
-                # Otra variable con misma expresión → B = A;
+                # Misma expresión pero otra variable: B = A;
                 nueva_linea = f"{indent}{lhs} = {primer_lhs};"
                 stmts.append({
                     "kind": "assign",
@@ -306,7 +323,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
                     "active": True,
                 })
         else:
-            # Primera vez que se ve esta expresión en estas versiones
+            # Primera vez que aparece esta expresión (en estas versiones)
             expr_cache[(expr_norm, snap)] = lhs
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             stmts.append({
@@ -328,14 +345,13 @@ def optimizar_codigo_fuente(texto: str) -> str:
         if stmt["kind"] == "assign":
             lhs = stmt["lhs"]
             if lhs in used_vars:
-                # Esta asignación alimenta un uso posterior → se queda
+                # Asignación necesaria (alimenta un uso posterior)
                 used_vars.discard(lhs)
                 used_vars.update(stmt["used"])
             else:
-                # Nadie usa el resultado de lhs → se elimina
+                # Nadie usa este resultado → se elimina
                 stmt["active"] = False
         else:
-            # Cualquier otra línea hace que sus variables cuenten como “usadas”
             used_vars.update(stmt["used"])
 
     # ---------------------------------------------
