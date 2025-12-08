@@ -108,11 +108,6 @@ def lex(texto):
 #   OPTIMIZACIÓN LOCAL DE CÓDIGO FUENTE (Tipos 1, 2 y 4)
 # =========================================================================
 
-import re
-from rules import RE_IDENT  # ya lo tienes importado arriba seguramente
-
-import re
-from rules import RE_IDENT  # asegúrate de tenerlo ya importado arriba
 
 def optimizar_codigo_fuente(texto: str) -> str:
     """
@@ -120,6 +115,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
     Implementa:
     - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
+      * SOLO si la expresión usa al menos una variable (no para constantes puras).
     - Tipo 4: Simplificaciones algebraicas sencillas:
         * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
       SIN resolver 5*2, 8*2, etc. (no se hace constant folding general).
@@ -241,11 +237,20 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
         # Variables usadas en RHS
         usados = set(re_ident.findall(rhs_simpl))
+
+        # Actualizar versión de lhs SIEMPRE
+        versiones[lhs] = versiones.get(lhs, 0) + 1
+
+        # ⚠️ IMPORTANTE: si la expresión es CONSTANTE (sin variables),
+        # NO aplicamos CSE; se deja tal cual.
+        if not usados:
+            nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            resultado.append(nueva_linea)
+            continue
+
+        # Para expresiones con variables, sí aplicamos CSE
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
-
-        # Actualizar versión de lhs
-        versiones[lhs] = versiones.get(lhs, 0) + 1
 
         # CSE: ¿la misma expresión ya se calculó con mismas versiones?
         if (expr_norm, snap) in expr_cache:
@@ -260,6 +265,7 @@ def optimizar_codigo_fuente(texto: str) -> str:
             resultado.append(nueva_linea)
 
     return "\n".join(resultado)
+
 
 
 # =========================================================================
