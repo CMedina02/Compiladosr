@@ -2,12 +2,13 @@
 # -----------------------------------------
 # Traduce triplos (N, O, D.O, D.F) a código
 # ensamblador 8086 (modo real) siguiendo
-# las reglas académicas dadas.
+# las reglas académicas vistas en clase.
 # -----------------------------------------
 
 from typing import List, Tuple
 
 Triplo = Tuple[int, str, str, str]
+
 
 # -------------------------------------------------
 # Utilidades de formato
@@ -32,21 +33,21 @@ def _op_to_asm(op: str) -> str:
     if op == "":
         return ""
     if _es_entero(op):
-        return op
-    return op
+        return op      # inmediato decimal
+    return op          # variable o temporal
 
 
-def _linea_asm(etq: str, mnem: str, oper: str, comentario: str = "") -> str:
+def _linea_asm(etq: str, mnem: str, oper: str) -> str:
     """
     Formato uniforme: [Etiqueta] [Operación] [Operando(s)]
-    (Los comentarios se IGNORAN a propósito para que el ASM salga limpio)
+    Sin comentarios ni referencias a N.
     """
     parts = []
 
     if etq:
         parts.append(f"{etq}:")
     else:
-        parts.append("    ")
+        parts.append("    ")  # sangría si no hay etiqueta
 
     if mnem:
         if not etq:
@@ -55,8 +56,9 @@ def _linea_asm(etq: str, mnem: str, oper: str, comentario: str = "") -> str:
             parts.append(f" {mnem:<6}")
         if oper:
             parts.append(f" {oper}")
+    else:
+        parts.append("")
 
-    # NO agregamos comentarios al ensamblador
     return "".join(parts).rstrip()
 
 
@@ -76,9 +78,9 @@ JCC_MAP = {
 }
 
 
-def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
+def generar_codigo_ensamblador(triplos: List[Triplo]) -> str:
     """
-    Recibe la tabla de triplos [(N, O, DO, DF), ...]
+    Recibe la tabla de triplos [(N, O, D.O, D.F), ...]
     y regresa un string con el código ensamblador 8086.
 
     Suposiciones:
@@ -93,6 +95,10 @@ def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
         N:   op_rel   T1   K
         N+1: TRUE     destV   -
         N+2: FALSE    destF   -
+      Y se traducen a:
+        CMP T1, K
+        Jxx  ETdestV
+        JMP  ETdestF
     """
 
     # 1) Detectar qué N son destino de saltos (para poner etiquetas)
@@ -105,7 +111,6 @@ def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
 
     asm_lines: List[str] = []
     i = 0
-    n2index = {n: idx for idx, (n, _, _, _) in enumerate(triplos)}
 
     while i < len(triplos):
         n, op, do, df = triplos[i]
@@ -133,53 +138,35 @@ def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
                     etq_true = f"ET{dest_true}" if dest_true.isdigit() else dest_true
                     etq_false = f"ET{dest_false}" if dest_false.isdigit() else dest_false
 
+                    # CMP + Jcc + JMP
                     asm_lines.append(
-                        _linea_asm(
-                            etiqueta_actual,
-                            "MOV",
-                            f"AX, {left}"
-                        )
+                        _linea_asm(etiqueta_actual, "MOV", f"AX, {left}")
                     )
                     asm_lines.append(
-                        _linea_asm(
-                            "",
-                            "CMP",
-                            f"AX, {right}"
-                        )
+                        _linea_asm("", "CMP", f"AX, {right}")
                     )
 
                     jcc = JCC_MAP.get(op, "JMP")
                     asm_lines.append(
-                        _linea_asm(
-                            "",
-                            jcc,
-                            etq_true
-                        )
+                        _linea_asm("", jcc, etq_true)
                     )
                     asm_lines.append(
-                        _linea_asm(
-                            "",
-                            "JMP",
-                            etq_false
-                        )
+                        _linea_asm("", "JMP", etq_false)
                     )
 
                     i += 3
                     continue
 
+            # Si no es bloque bien formado, solo generamos CMP simple
             left = _op_to_asm(do)
             right = _op_to_asm(df)
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "CMP",
-                    f"{left}, {right}"
-                )
+                _linea_asm(etiqueta_actual, "CMP", f"{left}, {right}")
             )
             i += 1
             continue
 
-        # TRUE / FALSE: sólo marcadores de salto
+        # Las líneas TRUE/FALSE ya fueron tomadas por el bloque relacional
         if op in ("TRUE", "FALSE"):
             if etiqueta_actual:
                 asm_lines.append(_linea_asm(etiqueta_actual, "", ""))
@@ -193,11 +180,7 @@ def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
             dest = _op_to_asm(do)
             src = _op_to_asm(df)
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "MOV",
-                    f"{dest}, {src}"
-                )
+                _linea_asm(etiqueta_actual, "MOV", f"{dest}, {src}")
             )
             i += 1
             continue
@@ -211,153 +194,90 @@ def generar_ensamblador_8086(triplos: List[Triplo]) -> str:
             mnem = "ADD" if op == "+" else "SUB"
 
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "MOV",
-                    f"AX, {dest}"
-                )
+                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    mnem,
-                    f"AX, {src}"
-                )
+                _linea_asm("", mnem, f"AX, {src}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"{dest}, AX"
-                )
+                _linea_asm("", "MOV", f"{dest}, AX")
             )
             i += 1
             continue
 
         # -------------------------
         #  Multiplicación: dest = dest * src
+        #  Uso de MUL BL (AL * BL → AX)
         # -------------------------
         if op == "*":
             dest = _op_to_asm(do)
             src = _op_to_asm(df)
 
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "MOV",
-                    f"AL, {dest}"
-                )
+                _linea_asm(etiqueta_actual, "MOV", f"AL, {dest}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"BL, {src}"
-                )
+                _linea_asm("", "MOV", f"BL, {src}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MUL",
-                    "BL"
-                )
+                _linea_asm("", "MUL", "BL")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"{dest}, AX"
-                )
+                _linea_asm("", "MOV", f"{dest}, AX")
             )
             i += 1
             continue
 
         # -------------------------
         #  División: dest = dest / src
+        #  DIV BL, AX=dividendo, BL=divisor, AL=cociente
         # -------------------------
         if op == "/":
             dest = _op_to_asm(do)
             src = _op_to_asm(df)
 
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "MOV",
-                    f"AX, {dest}"
-                )
+                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"BL, {src}"
-                )
+                _linea_asm("", "MOV", f"BL, {src}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "DIV",
-                    "BL"
-                )
+                _linea_asm("", "DIV", "BL")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"{dest}, AL"
-                )
+                _linea_asm("", "MOV", f"{dest}, AL")
             )
             i += 1
             continue
 
         # -------------------------
         #  Módulo: dest = dest % src
+        #  Igual que DIV pero se copia AH (residuo)
         # -------------------------
         if op == "%":
             dest = _op_to_asm(do)
             src = _op_to_asm(df)
 
             asm_lines.append(
-                _linea_asm(
-                    etiqueta_actual,
-                    "MOV",
-                    f"AX, {dest}"
-                )
+                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"BL, {src}"
-                )
+                _linea_asm("", "MOV", f"BL, {src}")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "DIV",
-                    "BL"
-                )
+                _linea_asm("", "DIV", "BL")
             )
             asm_lines.append(
-                _linea_asm(
-                    "",
-                    "MOV",
-                    f"{dest}, AH"
-                )
+                _linea_asm("", "MOV", f"{dest}, AH")
             )
             i += 1
             continue
 
         # -------------------------
-        #  Operador desconocido
+        #  Operador desconocido: sólo dejamos etiqueta
         # -------------------------
-        asm_lines.append(
-            _linea_asm(
-                etiqueta_actual,
-                "NOP",
-                ""
-            )
-        )
+        asm_lines.append(_linea_asm(etiqueta_actual, "", ""))
         i += 1
 
     return "\n".join(asm_lines)
