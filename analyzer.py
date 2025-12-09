@@ -1,7 +1,8 @@
 # analyzer.py — Compilador educativo + optimización local
 
+# analyzer.py — Compilador educativo + optimización local
+
 import re
-from codegen8086 import generar_codigo_ensamblador
 from rules import (
     TOKEN_PATTERN, idx_a_line_col,
     RE_TIPO, RE_IDENT, RE_FLOAT, RE_INT, RE_STR, RE_CHAR, RE_SYSPRINT,

@@ -1,18 +1,21 @@
 # codegen8086.py
 # -----------------------------------------
-# Traduce triplos (N, O, D.O, D.F) a código
-# ensamblador 8086 (modo real) siguiendo
-# las reglas académicas vistas en clase.
+# Generador de código ensamblador 8086
+# directo desde el CÓDIGO OPTIMIZADO.
+#
+# - NO usa temporales de triplos.
+# - Usa AX como acumulador y BX como
+#   segundo operando.
+# - Traduce:
+#     * Asignaciones con +, -, *, /, % y ()
+#     * do { ... } while (cond_relacional);
 # -----------------------------------------
 
 from typing import List, Tuple
 
-Triplo = Tuple[int, str, str, str]
-
-
-# -------------------------------------------------
-# Utilidades de formato
-# -------------------------------------------------
+# ============================================================
+# Utilidades generales
+# ============================================================
 
 def _es_entero(s: str) -> bool:
     try:
@@ -22,51 +25,238 @@ def _es_entero(s: str) -> bool:
         return False
 
 
-def _op_to_asm(op: str) -> str:
-    """
-    Convierte un operando del triplo a operando de ASM.
-    Si es número → inmediato, si no, se deja como identificador.
-    """
+def _op_txt(op) -> str:
+    """Normaliza operando a texto."""
     if op is None:
         return ""
-    op = str(op).strip()
-    if op == "":
-        return ""
-    if _es_entero(op):
-        return op      # inmediato decimal
-    return op          # variable o temporal
+    return str(op).strip()
 
 
-def _linea_asm(etq: str, mnem: str, oper: str) -> str:
+def _linea_asm(etq: str, mnem: str, oper: str = "") -> str:
     """
-    Formato uniforme: [Etiqueta] [Operación] [Operando(s)]
-    Sin comentarios ni referencias a N.
+    Formato: [Etiqueta] [Operación] [Operandos]
+    Sin comentarios para que sea limpio.
     """
     parts = []
-
     if etq:
         parts.append(f"{etq}:")
     else:
-        parts.append("    ")  # sangría si no hay etiqueta
+        parts.append("    ")
 
     if mnem:
-        if not etq:
-            parts.append(f"{mnem:<6}")
-        else:
+        # si hay etiqueta, dejo un espacio; si no, indentación
+        if etq:
             parts.append(f" {mnem:<6}")
+        else:
+            parts.append(f"{mnem:<6}")
         if oper:
             parts.append(f" {oper}")
-    else:
-        parts.append("")
-
     return "".join(parts).rstrip()
 
 
-# -------------------------------------------------
-# Traducción de triplos a ensamblador
-# -------------------------------------------------
+# ============================================================
+#  Tokenizador y parser de expresiones (shunting-yard)
+# ============================================================
 
-REL_OPS = {"<", ">", "<=", ">=", "==", "!="}
+OPERADORES = {"+", "-", "*", "/", "%"}
+PRECEDENCIA = {
+    "+": 1,
+    "-": 1,
+    "*": 2,
+    "/": 2,
+    "%": 2,
+}
+ASOCIATIVA_IZQ = {"+", "-", "*", "/", "%"}
+
+
+def _tokenizar_expr(expr: str) -> List[str]:
+    """
+    Tokeniza una expresión en:
+      - identificadores (variables)
+      - números
+      - operadores + - * / %
+      - paréntesis ( )
+    """
+    tokens = []
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c.isalpha() or c == "_":
+            j = i + 1
+            while j < len(expr) and (expr[j].isalnum() or expr[j] == "_"):
+                j += 1
+            tokens.append(expr[i:j])
+            i = j
+        elif c.isdigit():
+            j = i + 1
+            while j < len(expr) and expr[j].isdigit():
+                j += 1
+            tokens.append(expr[i:j])
+            i = j
+        elif c in "+-*/%()":
+            tokens.append(c)
+            i += 1
+        else:
+            # carácter desconocido, lo agregamos tal cual
+            tokens.append(c)
+            i += 1
+    return tokens
+
+
+def _a_postfijo(tokens: List[str]) -> List[str]:
+    """
+    Shunting-yard: infijo -> postfijo.
+    Maneja + - * / % y paréntesis.
+    """
+    salida = []
+    pila = []
+    for tok in tokens:
+        if tok in OPERADORES:
+            while pila and pila[-1] in OPERADORES:
+                top = pila[-1]
+                if (PRECEDENCIA[top] > PRECEDENCIA[tok]) or (
+                    PRECEDENCIA[top] == PRECEDENCIA[tok] and tok in ASOCIATIVA_IZQ
+                ):
+                    salida.append(pila.pop())
+                else:
+                    break
+            pila.append(tok)
+        elif tok == "(":
+            pila.append(tok)
+        elif tok == ")":
+            while pila and pila[-1] != "(":
+                salida.append(pila.pop())
+            if pila and pila[-1] == "(":
+                pila.pop()
+        else:
+            # identificador o número
+            salida.append(tok)
+    while pila:
+        salida.append(pila.pop())
+    return salida
+
+
+# ============================================================
+#  Generación de código ASM para una expresión
+# ============================================================
+
+def _emit_expr_to_ax(expr: str, asm_lines: List[str]) -> None:
+    """
+    Genera instrucciones que dejan el valor de 'expr' en AX.
+    Usa AX como acumulador y BX como segundo operando.
+    NO crea temporales en memoria.
+    """
+    expr = expr.strip()
+    if not expr:
+        asm_lines.append(_linea_asm("", "MOV", "AX, 0"))
+        return
+
+    tokens = _tokenizar_expr(expr)
+    post = _a_postfijo(tokens)
+
+    # Elementos en la pila: dict(kind='var'|'imm'|'regAX', value=...)
+    stack = []
+
+    def load_to_ax(elem):
+        """Carga elem en AX si no está ya en AX."""
+        if elem["kind"] == "regAX":
+            return
+        if elem["kind"] == "imm":
+            asm_lines.append(_linea_asm("", "MOV", f"AX, {elem['value']}"))
+        else:  # var
+            asm_lines.append(_linea_asm("", "MOV", f"AX, {elem['value']}"))
+
+    def operand_txt(elem):
+        if elem["kind"] == "imm":
+            return elem["value"]
+        elif elem["kind"] == "var":
+            return elem["value"]
+        else:  # regAX
+            return "AX"
+
+    for tok in post:
+        if tok in OPERADORES:
+            # Operador binario: pop derecha e izquierda
+            if len(stack) < 2:
+                # expresión mal formada, simplificamos a 0
+                asm_lines.append(_linea_asm("", "MOV", "AX, 0"))
+                stack = [{"kind": "regAX"}]
+                break
+
+            right = stack.pop()
+            left = stack.pop()
+
+            # Suma / Resta
+            if tok in ("+", "-"):
+                load_to_ax(left)
+                op2 = operand_txt(right)
+                mnem = "ADD" if tok == "+" else "SUB"
+                asm_lines.append(_linea_asm("", mnem, f"AX, {op2}"))
+                stack.append({"kind": "regAX"})
+                continue
+
+            # Multiplicación
+            if tok == "*":
+                # Regla: AL * BL → AX
+                # Ponemos left en AL, right en BL
+                if left["kind"] == "regAX":
+                    # ya está en AX, usamos AL directamente
+                    pass
+                else:
+                    op1 = operand_txt(left)
+                    asm_lines.append(_linea_asm("", "MOV", f"AL, {op1}"))
+                op2 = operand_txt(right)
+                asm_lines.append(_linea_asm("", "MOV", f"BL, {op2}"))
+                asm_lines.append(_linea_asm("", "MUL", "BL"))
+                # resultado en AX
+                stack.append({"kind": "regAX"})
+                continue
+
+            # División
+            if tok == "/":
+                # AX = dividendo, BL = divisor, DIV BL
+                load_to_ax(left)
+                op2 = operand_txt(right)
+                asm_lines.append(_linea_asm("", "MOV", f"BL, {op2}"))
+                asm_lines.append(_linea_asm("", "DIV", "BL"))
+                # Cociente en AL, pero tratamos AX como resultado
+                stack.append({"kind": "regAX"})
+                continue
+
+            # Módulo
+            if tok == "%":
+                load_to_ax(left)
+                op2 = operand_txt(right)
+                asm_lines.append(_linea_asm("", "MOV", f"BL, {op2}"))
+                asm_lines.append(_linea_asm("", "DIV", "BL"))
+                # Residuo en AH -> lo pasamos a AL/AX
+                asm_lines.append(_linea_asm("", "MOV", "AL, AH"))
+                stack.append({"kind": "regAX"})
+                continue
+
+        else:
+            # operando
+            if _es_entero(tok):
+                stack.append({"kind": "imm", "value": tok})
+            else:
+                stack.append({"kind": "var", "value": tok})
+
+    # Al final, el tope debe estar en AX
+    if not stack:
+        asm_lines.append(_linea_asm("", "MOV", "AX, 0"))
+    else:
+        top = stack.pop()
+        load_to_ax(top)
+
+
+# ============================================================
+#  Generación de ASM para asignaciones y do-while
+# ============================================================
+
+REL_OPS = ["<=", ">=", "==", "!=", "<", ">"]
 
 JCC_MAP = {
     "==": "JE",
@@ -78,206 +268,134 @@ JCC_MAP = {
 }
 
 
-def generar_codigo_ensamblador(triplos: List[Triplo]) -> str:
+def _partir_relacional(cond: str):
     """
-    Recibe la tabla de triplos [(N, O, D.O, D.F), ...]
-    y regresa un string con el código ensamblador 8086.
+    Separa una condición simple tipo:
+      expr OP expr
+    donde OP ∈ REL_OPS.
+    Devuelve (left_expr, op, right_expr) o (cond, None, None) si no encuentra.
+    """
+    cond = cond.strip()
+    for op in REL_OPS:
+        pos = cond.find(op)
+        if pos != -1:
+            left = cond[:pos].strip()
+            right = cond[pos + len(op):].strip()
+            return left, op, right
+    return cond, None, None
 
-    Suposiciones:
-    - Triplos aritméticos tipo 3-direcciones:
-        =  dest  src        → dest = src
-        +  dest  src        → dest = dest + src
-        -  dest  src        → dest = dest - src
-        *  dest  src        → dest = dest * src
-        /  dest  src        → dest = dest / src
-        %  dest  src        → dest = dest % src
-    - Triplos relacionales vienen en bloques: [REL] / TRUE / FALSE
-        N:   op_rel   T1   K
-        N+1: TRUE     destV   -
-        N+2: FALSE    destF   -
-      Y se traducen a:
-        CMP T1, K
-        Jxx  ETdestV
-        JMP  ETdestF
+
+def generar_ensamblador_8086(codigo_opt: str) -> str:
+    """
+    Recibe el CÓDIGO OPTIMIZADO como texto
+    y genera el código ensamblador 8086.
+
+    - Sin temporales de triplos.
+    - Usa etiquetas para do-while.
     """
 
-    # 1) Detectar qué N son destino de saltos (para poner etiquetas)
-    destinos = set()
-    for n, o, do, df in triplos:
-        if o in ("TRUE", "FALSE"):
-            d = str(do).strip()
-            if d.isdigit():
-                destinos.add(int(d))
+    lineas = codigo_opt.splitlines()
+    asm: List[str] = []
 
-    asm_lines: List[str] = []
-    i = 0
+    loop_stack: List[str] = []   # pila de etiquetas de inicio de do-while
+    loop_counter = 0
 
-    while i < len(triplos):
-        n, op, do, df = triplos[i]
-        op = str(op).strip() if op is not None else ""
-        do = str(do).strip() if do is not None else ""
-        df = str(df).strip() if df is not None else ""
+    for linea in lineas:
+        raw = linea.rstrip("\n")
+        txt = raw.strip()
 
-        etiqueta_actual = f"ET{n}" if n in destinos else ""
-
-        # -------------------------
-        #  BLOQUE RELACIONAL: op / TRUE / FALSE
-        # -------------------------
-        if op in REL_OPS:
-            if i + 2 < len(triplos):
-                n_true, o_true, do_true, _ = triplos[i + 1]
-                n_false, o_false, do_false, _ = triplos[i + 2]
-
-                if o_true == "TRUE" and o_false == "FALSE":
-                    left = _op_to_asm(do)
-                    right = _op_to_asm(df)
-
-                    dest_true = str(do_true).strip()
-                    dest_false = str(do_false).strip()
-
-                    etq_true = f"ET{dest_true}" if dest_true.isdigit() else dest_true
-                    etq_false = f"ET{dest_false}" if dest_false.isdigit() else dest_false
-
-                    # CMP + Jcc + JMP
-                    asm_lines.append(
-                        _linea_asm(etiqueta_actual, "MOV", f"AX, {left}")
-                    )
-                    asm_lines.append(
-                        _linea_asm("", "CMP", f"AX, {right}")
-                    )
-
-                    jcc = JCC_MAP.get(op, "JMP")
-                    asm_lines.append(
-                        _linea_asm("", jcc, etq_true)
-                    )
-                    asm_lines.append(
-                        _linea_asm("", "JMP", etq_false)
-                    )
-
-                    i += 3
-                    continue
-
-            # Si no es bloque bien formado, solo generamos CMP simple
-            left = _op_to_asm(do)
-            right = _op_to_asm(df)
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "CMP", f"{left}, {right}")
-            )
-            i += 1
+        if not txt:
             continue
 
-        # Las líneas TRUE/FALSE ya fueron tomadas por el bloque relacional
-        if op in ("TRUE", "FALSE"):
-            if etiqueta_actual:
-                asm_lines.append(_linea_asm(etiqueta_actual, "", ""))
-            i += 1
+        # -------------------------------------------------
+        # Declaraciones: E$, F$, C$ ... -> por ahora se omiten
+        # -------------------------------------------------
+        if txt.startswith("E$") or txt.startswith("F$") or txt.startswith("C$"):
+            # Podrías generar defs de variables aquí si lo requieren,
+            # por ahora dejamos vacío.
             continue
 
-        # -------------------------
-        #  Asignación simple (=)
-        # -------------------------
-        if op == "=":
-            dest = _op_to_asm(do)
-            src = _op_to_asm(df)
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "MOV", f"{dest}, {src}")
-            )
-            i += 1
+        # -------------------------------------------------
+        # do {  -> etiqueta de inicio de ciclo
+        # -------------------------------------------------
+        if txt.startswith("do") and "{" in txt:
+            loop_counter += 1
+            etq = f"ET_DO{loop_counter}"
+            loop_stack.append(etq)
+            asm.append(_linea_asm(etq, "", ""))
             continue
 
-        # -------------------------
-        #  Suma / Resta: dest = dest (+|-) src
-        # -------------------------
-        if op in ("+", "-"):
-            dest = _op_to_asm(do)
-            src = _op_to_asm(df)
-            mnem = "ADD" if op == "+" else "SUB"
+        # -------------------------------------------------
+        # } while (cond);
+        # -------------------------------------------------
+        if txt.startswith("}") and "while" in txt:
+            if not loop_stack:
+                continue  # estructura rota, ignoramos
 
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
-            )
-            asm_lines.append(
-                _linea_asm("", mnem, f"AX, {src}")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"{dest}, AX")
-            )
-            i += 1
+            etq_inicio = loop_stack.pop()
+
+            # extraer condición entre paréntesis
+            # ejemplo: } while (X * H <= 400);
+            s = txt
+            ini = s.find("(")
+            fin = s.rfind(")")
+            if ini != -1 and fin != -1 and fin > ini:
+                cond = s[ini + 1:fin]
+            else:
+                cond = ""
+
+            left, op_rel, right = _partir_relacional(cond)
+
+            # si no hay relacional, no generamos nada
+            if op_rel is None:
+                continue
+
+            # Evaluar left y right
+            _emit_expr_to_ax(left, asm)          # AX = left
+            # Right en BX o inmediato
+            # Si es número, usamos inmediato en CMP, si no, cargamos a BX
+            right = right.strip()
+            if _es_entero(right):
+                asm.append(_linea_asm("", "CMP", f"AX, {right}"))
+            else:
+                asm.append(_linea_asm("", "MOV", f"BX, {right}"))
+                asm.append(_linea_asm("", "CMP", "AX, BX"))
+
+            jcc = JCC_MAP.get(op_rel, "JMP")
+            asm.append(_linea_asm("", jcc, etq_inicio))
+
             continue
 
-        # -------------------------
-        #  Multiplicación: dest = dest * src
-        #  Uso de MUL BL (AL * BL → AX)
-        # -------------------------
-        if op == "*":
-            dest = _op_to_asm(do)
-            src = _op_to_asm(df)
-
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "MOV", f"AL, {dest}")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"BL, {src}")
-            )
-            asm_lines.append(
-                _linea_asm("", "MUL", "BL")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"{dest}, AX")
-            )
-            i += 1
+        # -------------------------------------------------
+        # Llaves sueltas { o } sin while -> no producen código
+        # -------------------------------------------------
+        if txt == "{" or txt == "}":
             continue
 
-        # -------------------------
-        #  División: dest = dest / src
-        #  DIV BL, AX=dividendo, BL=divisor, AL=cociente
-        # -------------------------
-        if op == "/":
-            dest = _op_to_asm(do)
-            src = _op_to_asm(df)
+        # -------------------------------------------------
+        # Asignaciones: ID = expr;
+        # -------------------------------------------------
+        # quitamos ';' final si existe
+        linea_sin_puntoycoma = txt
+        if linea_sin_puntoycoma.endswith(";"):
+            linea_sin_puntoycoma = linea_sin_puntoycoma[:-1]
 
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"BL, {src}")
-            )
-            asm_lines.append(
-                _linea_asm("", "DIV", "BL")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"{dest}, AL")
-            )
-            i += 1
-            continue
+        # Buscar patrón ID = expr
+        if "=" in linea_sin_puntoycoma:
+            partes = linea_sin_puntoycoma.split("=", 1)
+            lhs = partes[0].strip()
+            rhs = partes[1].strip()
 
-        # -------------------------
-        #  Módulo: dest = dest % src
-        #  Igual que DIV pero se copia AH (residuo)
-        # -------------------------
-        if op == "%":
-            dest = _op_to_asm(do)
-            src = _op_to_asm(df)
+            if lhs:
+                # Evaluar RHS en AX
+                _emit_expr_to_ax(rhs, asm)
+                # Mover resultado a la variable destino
+                asm.append(_linea_asm("", "MOV", f"{lhs}, AX"))
+                continue
 
-            asm_lines.append(
-                _linea_asm(etiqueta_actual, "MOV", f"AX, {dest}")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"BL, {src}")
-            )
-            asm_lines.append(
-                _linea_asm("", "DIV", "BL")
-            )
-            asm_lines.append(
-                _linea_asm("", "MOV", f"{dest}, AH")
-            )
-            i += 1
-            continue
+        # -------------------------------------------------
+        # Cualquier otra línea se ignora en esta versión
+        # -------------------------------------------------
+        # (si tuvieras otras estructuras, podrías manejarlas aquí)
 
-        # -------------------------
-        #  Operador desconocido: sólo dejamos etiqueta
-        # -------------------------
-        asm_lines.append(_linea_asm(etiqueta_actual, "", ""))
-        i += 1
-
-    return "\n".join(asm_lines)
+    return "\n".join(asm)
