@@ -109,17 +109,19 @@ def optimizar_codigo_fuente(texto: str) -> str:
     """
     Optimización local del código fuente ANTES del análisis léxico.
 
-    Implementa:
-    - Tipo 1: Expresiones repetidas sin cambios en sus variables (CSE).
-      * SOLO si la expresión usa al menos una variable (no para constantes puras).
-      * SOLO si la variable del lado izquierdo **no aparece** en la expresión
-        (para no romper contadores tipo R = R + 1).
-      * Reutiliza el resultado ya calculado: T2 = T1; T3 = T1; etc.
-    - Tipo 4: Simplificaciones algebraicas sencillas:
-        * Quitar:  / 1,  * 1,  1 * x,  + 0,  0 + x,  - 0
-        * Caso especial:  C = C + B * 2;  ->  C = C + B;
-          (solo cuando el factor es una VARIABLE, no un número)
-    NO elimina instrucciones completas, solo las simplifica.
+    Hace:
+    - CSE completo (expresiones idénticas sin cambios en sus variables).
+    - CSE parcial de subexpresiones:
+        * X = (A * B) + (C / D);
+          Z = ((A * B) + (C / D)) * P;
+          --> Z = X * P;
+
+        * K = (X + 1) * A;
+          M = (X + 1) * A + B;
+          --> M = K + B;
+
+    - Simplificaciones algebraicas:
+        /1, *1, 1*, +0, 0+, -0, y caso especial var + (var * 2).
     """
 
     lineas = texto.splitlines()
@@ -133,12 +135,12 @@ def optimizar_codigo_fuente(texto: str) -> str:
 
     # Asignaciones del tipo:   ID = expr;
     re_asig = re.compile(r'^(\s*)(' + ident_core + r')\s*=\s*(.+?);?\s*$')
-    # Identificadores válidos según tu lenguaje
     re_ident = re.compile(ident_core)
 
-    # ------------------ simplificación algebraica (tipo 4) ------------------
+    # ---------------------------------------------
+    # Simplificación algebraica local
+    # ---------------------------------------------
     def simplificar_expr(expr: str) -> str:
-        # No tocamos expresiones con strings/chars
         if '"' in expr or "'" in expr:
             return expr
 
@@ -146,31 +148,50 @@ def optimizar_codigo_fuente(texto: str) -> str:
         old = None
         while old != e:
             old = e
-            # / 1
-            e = re.sub(r'/\s*1\b', '', e)
-            # * 1
-            e = re.sub(r'\*\s*1\b', '', e)
-            # 1 * x
-            e = re.sub(r'\b1\s*\*\s*', '', e)
-            # + 0
-            e = re.sub(r'\s*\+\s*0\b', '', e)
-            # 0 + x
-            e = re.sub(r'\b0\s*\+\s*', '', e)
-            # - 0
-            e = re.sub(r'\s*-\s*0\b', '', e)
+            e = re.sub(r'/\s*1\b', '', e)         # /1
+            e = re.sub(r'\*\s*1\b', '', e)        # *1
+            e = re.sub(r'\b1\s*\*\s*', '', e)     # 1*
+            e = re.sub(r'\s*\+\s*0\b', '', e)     # +0
+            e = re.sub(r'\b0\s*\+\s*', '', e)     # 0+
+            e = re.sub(r'\s*-\s*0\b', '', e)      # -0
 
-            # C = C + B * 2  ->  C = C + B
+            # C = C + B * 2;  ->  C = C + B;
             pattern_sum_var_times2 = (
-                r'(\b' + ident_core + r'\s*\+\s*)'   # "C + "
-                r'(' + ident_core + r')\s*\*\s*2\b'  # "B * 2"
+                r'(\b' + ident_core + r'\s*\+\s*)'
+                r'(' + ident_core + r')\s*\*\s*2\b'
             )
             e = re.sub(pattern_sum_var_times2, r'\1\2', e)
 
         return e
 
-    # ------------------ CSE tipo 1 ------------------
-    versiones = {}      # nombre -> versión (entero)
-    expr_cache = {}     # (expr_normalizada, snapshot_versiones) -> primer_lhs
+    def sin_espacios(s: str) -> str:
+        return re.sub(r'\s+', '', s)
+
+    def pretty_from_ns(ns: str) -> str:
+        out = []
+        buf = ""
+        for ch in ns:
+            if ch in "+-*/%":
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(f" {ch} ")
+            elif ch in "()":
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(ch)
+            else:
+                buf += ch
+        if buf:
+            out.append(buf)
+        s = "".join(out)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+
+    versiones = {}          # nombre -> versión
+    expr_cache = {}         # (expr_norm, snapshot) -> lhs
+    subexprs = []           # candidatos de subexpresión
 
     resultado = []
 
@@ -180,7 +201,6 @@ def optimizar_codigo_fuente(texto: str) -> str:
     def normalizar_expr(expr: str) -> str:
         expr = expr.strip()
 
-        # Quitar paréntesis envolventes externos si todo está dentro
         while expr.startswith('(') and expr.endswith(')'):
             depth = 0
             wrapped = True
@@ -197,7 +217,6 @@ def optimizar_codigo_fuente(texto: str) -> str:
             else:
                 break
 
-        # Si tiene cadenas o '/', solo limpiamos espacios
         if '"' in expr or "'" in expr or '/' in expr:
             return re.sub(r'\s+', '', expr)
 
@@ -222,54 +241,127 @@ def optimizar_codigo_fuente(texto: str) -> str:
         norm_terms.sort()
         return ''.join(norm_terms)
 
-    # ------------------ Recorrido línea por línea ------------------
+    # ---------------------------------------------
+    # Reemplazo de subexpresiones con variables previas
+    # ---------------------------------------------
+    def reemplazar_subexpresiones(expr: str) -> str:
+        expr_ns = sin_espacios(expr)
+        if not expr_ns:
+            return expr
+
+        # Probamos primero las expresiones más largas
+        candidatos = sorted(subexprs, key=lambda c: len(c["expr_ns"]), reverse=True)
+
+        for cand in candidatos:
+            snap = cand["snapshot"]
+            ok = True
+            for v, ver in snap:
+                if versiones.get(v, 0) != ver:
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            sub_ns = cand["expr_ns"]
+            if not sub_ns:
+                continue
+            if sub_ns not in expr_ns:
+                continue
+
+            var = cand["lhs"]
+            new_ns = None
+
+            # Prefijo directo: (X+1)*A+B  donde (X+1)*A ya existe
+            if expr_ns.startswith(sub_ns) and len(expr_ns) > len(sub_ns):
+                sig = expr_ns[len(sub_ns)]
+                if sig in "+-*/%":
+                    new_ns = var + expr_ns[len(sub_ns):]
+
+            # Prefijo con paréntesis: ((A*B)+(C/D))*P
+            if new_ns is None:
+                pref = "(" + sub_ns + ")"
+                if expr_ns.startswith(pref) and len(expr_ns) > len(pref):
+                    sig = expr_ns[len(pref)]
+                    if sig in "+-*/%":
+                        new_ns = var + expr_ns[len(pref):]
+
+            # Sufijo directo
+            if new_ns is None and len(expr_ns) > len(sub_ns):
+                if expr_ns.endswith(sub_ns):
+                    pos = len(expr_ns) - len(sub_ns) - 1
+                    if pos >= 0 and expr_ns[pos] in "+-*/%":
+                        new_ns = expr_ns[:pos + 1] + var
+
+            # Sufijo con paréntesis
+            if new_ns is None:
+                suf = "(" + sub_ns + ")"
+                if expr_ns.endswith(suf) and len(expr_ns) > len(suf):
+                    pos = len(expr_ns) - len(suf) - 1
+                    if pos >= 0 and expr_ns[pos] in "+-*/%":
+                        new_ns = expr_ns[:pos + 1] + var
+
+            if new_ns is not None:
+                return pretty_from_ns(new_ns)
+
+        return expr
+
+    # ---------------------------------------------
+    # Recorrido línea por línea
+    # ---------------------------------------------
     for linea in lineas:
         m = re_asig.match(linea)
         if not m:
-            # No es asignación simple
             resultado.append(linea)
             continue
 
         indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
 
-        # 1) simplificar algebraicamente
         rhs_simpl = simplificar_expr(rhs)
 
-        # 2) variables usadas en RHS
-        usados = set(re_ident.findall(rhs_simpl))
-
-        # 3) siempre que se asigna a lhs, sube su versión
+        # Actualizamos versión de la variable de la izquierda
         versiones[lhs] = versiones.get(lhs, 0) + 1
 
-        # 4) si no hay variables (pura constante), no hacemos CSE
+        usados = set(re_ident.findall(rhs_simpl))
+
+        # Asignación constante (sin variables): no se optimiza
         if not usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
             continue
 
-        # 5) si lhs aparece en RHS (R = R + 1), no hacemos CSE
+        # Evitar tocar contadores tipo R = R + 1
         if lhs in usados:
             nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
             resultado.append(nueva_linea)
             continue
 
-        # 6) CSE: expresiones con variables y sin lhs
+        # Intentar primero reemplazo de subexpresiones
+        rhs_simpl = reemplazar_subexpresiones(rhs_simpl)
+        usados = set(re_ident.findall(rhs_simpl))
+
         snap = snapshot_versiones(usados)
         expr_norm = normalizar_expr(rhs_simpl)
         key = (expr_norm, snap)
 
+        # CSE completo (expresión idéntica previa)
         if key in expr_cache:
-            primer_lhs = expr_cache[key]
-            if primer_lhs != lhs:
-                # reutilizamos el valor ya calculado en otra variable
-                nueva_linea = f"{indent}{lhs} = {primer_lhs};"
-            else:
-                # misma variable + misma expresión: la dejamos tal cual
-                nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
-        else:
-            expr_cache[key] = lhs
-            nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
+            var_prev = expr_cache[key]
+            nueva_linea = f"{indent}{lhs} = {var_prev};"
+            resultado.append(nueva_linea)
+            continue
 
+        # Nueva expresión: la registramos para futuros CSE y subexpresiones
+        expr_cache[key] = lhs
+
+        if any(op in rhs_simpl for op in "+-*/%"):
+            subexprs.append({
+                "lhs": lhs,
+                "expr_text": rhs_simpl,
+                "expr_ns": sin_espacios(rhs_simpl),
+                "snapshot": snap
+            })
+
+        nueva_linea = f"{indent}{lhs} = {rhs_simpl};"
         resultado.append(nueva_linea)
 
     return "\n".join(resultado)
